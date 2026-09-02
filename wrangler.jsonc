@@ -2,19 +2,20 @@
   "$schema":"./node_modules/wrangler/config-schema.json",
   "name":"trigg-worker",
   "main":"apps/worker/src/index.ts",
-  "compatibility_date":"2026-08-29",
+  "compatibility_date":"2026-09-02",
   "compatibility_flags":["nodejs_compat"],
+  "workers_dev":true,
   "vars":{
-    "ENVIRONMENT":"development",
+    "ENVIRONMENT":"production",
     "TRIGG_MOCK_MODE":"true",
     "ALLOWED_ORIGINS":"http://localhost:5173,https://trigg.pages.dev",
-    "WEB_URL":"http://localhost:5173",
+    "WEB_URL":"https://trigg.pages.dev",
     "AI_MODEL":"@cf/meta/llama-3.1-8b-instruct",
     "EMAIL_FROM":"Trigg <automation@example.com>",
     "FREE_DAILY_RUN_LIMIT":"100",
     "FREE_DAILY_AI_LIMIT":"50"
   },
-  "d1_databases":[{"binding":"DB","database_name":"trigg-db","database_id":"local-placeholder-replace-after-create","migrations_dir":"apps/worker/migrations"}],
+  "d1_databases":[{"binding":"DB","database_name":"trigg-db","database_id":"8024f5ca-e94d-4ce3-803f-a4b30fe54458","migrations_dir":"apps/worker/migrations"}],
   "queues":{
     "producers":[{"binding":"WORKFLOW_QUEUE","queue":"trigg-workflows"}],
     "consumers":[{"queue":"trigg-workflows","max_batch_size":5,"max_batch_timeout":5,"max_retries":3,"dead_letter_queue":"trigg-workflows-dlq"}]

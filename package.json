@@ -8,6 +8,7 @@
     "dev": "pnpm --parallel --filter @trigg/web --filter @trigg/worker dev",
     "build": "pnpm -r build",
     "deploy:web": "pnpm --filter @trigg/worker deploy:web",
+    "deploy:worker": "pnpm --filter @trigg/worker run deploy:worker",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "pnpm -r typecheck",
     "test": "vitest run",

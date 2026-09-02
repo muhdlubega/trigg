@@ -188,8 +188,10 @@ Worker:
 
 ```bash
 pnpm --filter @trigg/worker build
-pnpm exec wrangler deploy
+pnpm deploy:worker
 ```
+
+Current demo Worker: `https://trigg-worker.muhdlubegasiraje.workers.dev`
 
 Pages project `trigg`:
 
