@@ -3,6 +3,7 @@
   "scripts":{
     "dev":"wrangler dev --config ../../wrangler.jsonc",
     "build":"wrangler deploy --dry-run --config ../../wrangler.jsonc --outdir dist",
+    "deploy:web":"wrangler pages deploy ../web/dist --project-name trigg --branch main --config ../web/wrangler.jsonc",
     "typecheck":"wrangler types src/worker-configuration.d.ts --config ../../wrangler.jsonc && tsc --noEmit",
     "db:migrate:local":"wrangler d1 migrations apply trigg-db --local --config ../../wrangler.jsonc",
     "db:migrate:remote":"wrangler d1 migrations apply trigg-db --remote --config ../../wrangler.jsonc"

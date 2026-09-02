@@ -195,8 +195,7 @@ Pages project `trigg`:
 
 ```bash
 pnpm --filter @trigg/web build
-pnpm exec wrangler pages project create trigg
-pnpm exec wrangler pages deploy apps/web/dist --project-name trigg
+pnpm deploy:web
 ```
 
 For Git integration in Cloudflare Pages use build command `pnpm --filter @trigg/web build`, root directory `/`, output directory `apps/web/dist`, Node 22, and the browser-safe environment variables above. Set `VITE_API_URL` to the deployed Worker. `apps/web/public/_redirects` provides SPA routing.
