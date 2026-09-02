@@ -1,0 +1,1 @@
+{"action":"opened","installation":{"id":123456},"repository":{"id":991,"full_name":"acme/api","private":false,"default_branch":"main"},"issue":{"number":87,"title":"Requests occasionally time out","body":"The webhook endpoint returned 524 twice today.","user":{"login":"grace"},"labels":[]}}

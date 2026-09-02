@@ -1,0 +1,15 @@
+{
+  "name":"@trigg/worker","version":"0.1.0","private":true,"type":"module",
+  "scripts":{
+    "dev":"wrangler dev --config ../../wrangler.jsonc",
+    "build":"wrangler deploy --dry-run --config ../../wrangler.jsonc --outdir dist",
+    "typecheck":"wrangler types src/worker-configuration.d.ts --config ../../wrangler.jsonc && tsc --noEmit",
+    "db:migrate:local":"wrangler d1 migrations apply trigg-db --local --config ../../wrangler.jsonc",
+    "db:migrate:remote":"wrangler d1 migrations apply trigg-db --remote --config ../../wrangler.jsonc"
+  },
+  "dependencies":{
+    "@trigg/ai":"workspace:*","@trigg/integrations":"workspace:*","@trigg/shared":"workspace:*","@trigg/workflow-engine":"workspace:*",
+    "hono":"^4.9.5","jose":"^6.0.13","zod":"^4.1.5"
+  },
+  "devDependencies":{"@cloudflare/workers-types":"^4.20250829.0","typescript":"^5.9.2","wrangler":"^4.33.1"}
+}
