@@ -38,8 +38,8 @@ app.use('/api/*',async(c,next)=>{
     const identity=await authenticate(token,c.env); const timestamp=now(); const existing=await c.env.DB.prepare('SELECT * FROM users WHERE firebase_uid = ?').bind(identity.firebaseUid).first<Record<string,string>>();
     const id=existing?.id ?? uuid('usr');
     const email=identity.email??existing?.email??`${identity.firebaseUid}@users.trigg.invalid`;
-    const displayName=identity.displayName??existing?.display_name;
-    const photoUrl=identity.photoUrl??existing?.photo_url;
+    const displayName=existing?.display_name??identity.displayName;
+    const photoUrl=existing?.photo_url??identity.photoUrl;
     if(existing) await c.env.DB.prepare('UPDATE users SET email=?,display_name=?,photo_url=?,updated_at=? WHERE id=?').bind(email,displayName??null,photoUrl??null,timestamp,id).run();
     else await c.env.DB.prepare('INSERT INTO users (id,firebase_uid,email,display_name,photo_url,created_at,updated_at) VALUES (?,?,?,?,?,?,?)').bind(id,identity.firebaseUid,email,displayName??null,photoUrl??null,timestamp,timestamp).run();
     c.set('user',{id,firebaseUid:identity.firebaseUid,email,...(displayName?{displayName}:{}),...(photoUrl?{photoUrl}:{})}); await next();
@@ -49,6 +49,8 @@ app.use('/api/*',async(c,next)=>{
 app.get('/',(c)=>c.json(ok({name:'Trigg API',tagline:'Automate what happens next.',environment:c.env.ENVIRONMENT})));
 app.get('/health',(c)=>c.json(ok({status:'ok',time:now()})));
 app.get('/api/me',(c)=>c.json(ok(c.get('user'))));
+app.patch('/api/me',async(c)=>{const body=z.object({displayName:z.string().trim().min(1).max(80)}).parse(await c.req.json());await c.env.DB.prepare('UPDATE users SET display_name=?,updated_at=? WHERE id=?').bind(body.displayName,now(),c.get('user').id).run();return c.json(ok({...c.get('user'),displayName:body.displayName}));});
+app.get('/api/settings/status',(c)=>c.json(ok({ai:{mistral:Boolean(c.env.MISTRAL_API_KEY),gemini:Boolean(c.env.GEMINI_API_KEY)},limits:{runs:Number(c.env.FREE_DAILY_RUN_LIMIT??100),ai:Number(c.env.FREE_DAILY_AI_LIMIT??50),emails:25}})));
 app.get('/api/node-definitions',async(c)=>c.json(ok({templates:WORKFLOW_TEMPLATES})));
 
 app.get('/api/dashboard',async(c)=>{
