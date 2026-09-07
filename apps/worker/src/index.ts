@@ -13,6 +13,7 @@ type Bindings = Env & {
   GITHUB_APP_SLUG?:string; RESEND_API_KEY?:string; GEMINI_API_KEY?:string; MISTRAL_API_KEY?:string; MISTRAL_MODEL?:string; GEMINI_MODEL?:string;
 };
 type QueueMessage = {kind:'github-event';eventId:string}|{kind:'workflow-run';workflowId:string;userId:string;input:ExecutionContext;mode:'LIVE'};
+type GitHubRepository = {id:number;full_name:string;private:boolean;default_branch:string;updated_at:string;owner:{login:string}};
 type AppContext = Context<{Bindings:Bindings;Variables:Variables}>;
 const app = new Hono<{Bindings:Bindings;Variables:Variables}>();
 
@@ -21,6 +22,15 @@ const fail=(code:string,message:string,status:400|401|403|404|409|429|500=400)=>
 const now=()=>new Date().toISOString();
 const uuid=(prefix:string)=>`${prefix}_${crypto.randomUUID().replaceAll('-','')}`;
 const parseJson=<T>(value:string|null,fallback:T):T=>{try{return value?JSON.parse(value) as T:fallback;}catch{return fallback;}};
+
+async function syncGitHubRepositories(env:Bindings,userId:string,localInstallationId:string,githubInstallationId:string){
+  if(!env.GITHUB_APP_ID||!env.GITHUB_PRIVATE_KEY)return;
+  const client=new GitHubAppClient(env.GITHUB_APP_ID,env.GITHUB_PRIVATE_KEY,githubInstallationId);
+  const result=await client.request<{repositories:GitHubRepository[]}>('GET','/installation/repositories?per_page=100');
+  const syncedAt=now();
+  for(const repository of result.repositories)await env.DB.prepare('INSERT INTO repositories (id,user_id,installation_id,github_repository_id,full_name,private,default_branch,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,github_repository_id) DO UPDATE SET installation_id=excluded.installation_id,full_name=excluded.full_name,private=excluded.private,default_branch=excluded.default_branch,updated_at=excluded.updated_at').bind(uuid('repo'),userId,localInstallationId,String(repository.id),repository.full_name,repository.private?1:0,repository.default_branch,syncedAt,repository.updated_at||syncedAt).run();
+  return result.repositories;
+}
 
 app.use('*', async (c,next) => cors({origin:(origin)=>origin && c.env.ALLOWED_ORIGINS.split(',').map((item)=>item.trim()).includes(origin)?origin:'',allowHeaders:['Authorization','Content-Type','X-Trigg-Secret'],allowMethods:['GET','POST','PATCH','DELETE','OPTIONS'],credentials:true})(c,next));
 
@@ -109,7 +119,7 @@ app.get('/api/executions',async(c)=>{const result=await c.env.DB.prepare('SELECT
 app.get('/api/executions/:id',async(c)=>{const execution=await c.env.DB.prepare('SELECT e.*,w.name workflow_name,v.definition_json FROM workflow_executions e JOIN workflows w ON w.id=e.workflow_id JOIN workflow_versions v ON v.workflow_id=e.workflow_id AND v.version=e.workflow_version WHERE e.id=? AND e.user_id=?').bind(c.req.param('id'),c.get('user').id).first();if(!execution)return fail('NOT_FOUND','Execution not found',404);const nodes=await c.env.DB.prepare('SELECT * FROM node_executions WHERE execution_id=? ORDER BY started_at').bind(c.req.param('id')).all();const usage=await c.env.DB.prepare('SELECT * FROM ai_usage WHERE execution_id=?').bind(c.req.param('id')).all();return c.json(ok({execution,nodes:nodes.results,aiUsage:usage.results}));});
 
 app.get('/api/integrations/github',async(c)=>{const installs=await c.env.DB.prepare('SELECT g.*,COUNT(r.id) repository_count FROM github_installations g LEFT JOIN repositories r ON r.installation_id=g.id WHERE g.user_id=? GROUP BY g.id').bind(c.get('user').id).all();return c.json(ok({configured:Boolean(c.env.GITHUB_APP_ID),appSlug:c.env.GITHUB_APP_SLUG??null,installations:installs.results}));});
-app.get('/api/github/repositories',async(c)=>{const result=await c.env.DB.prepare('SELECT * FROM repositories WHERE user_id=? ORDER BY full_name').bind(c.get('user').id).all();return c.json(ok(result.results));});
+app.get('/api/github/repositories',async(c)=>{const user=c.get('user');const installations=await c.env.DB.prepare('SELECT id,installation_id FROM github_installations WHERE user_id=?').bind(user.id).all<{id:string;installation_id:string}>();for(const installation of installations.results){try{await syncGitHubRepositories(c.env,user.id,installation.id,installation.installation_id);}catch{/* Return cached repositories if GitHub is temporarily unavailable. */}}const result=await c.env.DB.prepare('SELECT * FROM repositories WHERE user_id=? ORDER BY updated_at DESC,full_name ASC').bind(user.id).all();return c.json(ok(result.results));});
 app.post('/api/integrations/github/connect',async(c)=>{if(!c.env.GITHUB_APP_SLUG)return fail('NOT_CONFIGURED','GitHub App slug is not configured');const state=crypto.randomUUID();const timestamp=now();await c.env.DB.prepare("DELETE FROM integration_connections WHERE user_id=? AND provider='github_pending'").bind(c.get('user').id).run();await c.env.DB.prepare('INSERT INTO integration_connections (id,user_id,provider,status,config_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?)').bind(uuid('conn'),c.get('user').id,'github_pending','pending',JSON.stringify({state,expiresAt:Date.now()+15*60*1000}),timestamp,timestamp).run();return c.json(ok({url:`https://github.com/apps/${c.env.GITHUB_APP_SLUG}/installations/new?state=${encodeURIComponent(state)}`}));});
 app.post('/api/integrations/github/callback',async(c)=>{
   const {installationId,state}=z.object({installationId:z.coerce.string().min(1),state:z.string().min(1)}).parse(await c.req.json());
@@ -117,11 +127,11 @@ app.post('/api/integrations/github/callback',async(c)=>{
   if(!pending||pendingConfig.state!==state||pendingConfig.expiresAt<Date.now())return fail('INVALID_STATE','GitHub connection expired. Start the connection again.',401);
   if(!c.env.GITHUB_APP_ID||!c.env.GITHUB_PRIVATE_KEY)return fail('NOT_CONFIGURED','GitHub App credentials are not configured',500);
   const client=new GitHubAppClient(c.env.GITHUB_APP_ID,c.env.GITHUB_PRIVATE_KEY,installationId);
-  const result=await client.request<{repositories:Array<{id:number;full_name:string;private:boolean;default_branch:string;owner:{login:string}}>}>('GET','/installation/repositories');
+  const result=await client.request<{repositories:GitHubRepository[]}>('GET','/installation/repositories?per_page=100');
   const user=c.get('user');const timestamp=now();const localInstallationId=uuid('ghi');const accountLogin=result.repositories[0]?.owner.login??'GitHub account';
   await c.env.DB.prepare('INSERT INTO github_installations (id,user_id,installation_id,account_login,account_type,created_at,updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(installation_id) DO UPDATE SET user_id=excluded.user_id,account_login=excluded.account_login,updated_at=excluded.updated_at').bind(localInstallationId,user.id,installationId,accountLogin,'User',timestamp,timestamp).run();
   const installed=await c.env.DB.prepare('SELECT id FROM github_installations WHERE installation_id=? AND user_id=?').bind(installationId,user.id).first<{id:string}>();
-  for(const repository of result.repositories)await c.env.DB.prepare('INSERT INTO repositories (id,user_id,installation_id,github_repository_id,full_name,private,default_branch,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,github_repository_id) DO UPDATE SET installation_id=excluded.installation_id,full_name=excluded.full_name,private=excluded.private,default_branch=excluded.default_branch,updated_at=excluded.updated_at').bind(uuid('repo'),user.id,installed?.id??localInstallationId,String(repository.id),repository.full_name,repository.private?1:0,repository.default_branch,timestamp,timestamp).run();
+  for(const repository of result.repositories)await c.env.DB.prepare('INSERT INTO repositories (id,user_id,installation_id,github_repository_id,full_name,private,default_branch,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,github_repository_id) DO UPDATE SET installation_id=excluded.installation_id,full_name=excluded.full_name,private=excluded.private,default_branch=excluded.default_branch,updated_at=excluded.updated_at').bind(uuid('repo'),user.id,installed?.id??localInstallationId,String(repository.id),repository.full_name,repository.private?1:0,repository.default_branch,timestamp,repository.updated_at||timestamp).run();
   await c.env.DB.prepare('DELETE FROM integration_connections WHERE id=?').bind(pending.id).run();
   return c.json(ok({connected:true,repositories:result.repositories.length}));
 });
