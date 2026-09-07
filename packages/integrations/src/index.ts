@@ -2,10 +2,6 @@ export interface SendEmailInput { to:string; subject:string; body:string }
 export interface EmailResult { id:string; provider:string }
 export interface EmailProvider { send(input:SendEmailInput):Promise<EmailResult> }
 
-export class LogEmailProvider implements EmailProvider {
-  async send(input: SendEmailInput) { console.log(JSON.stringify({event:'email.mock',to:input.to,subject:input.subject})); return {id:crypto.randomUUID(),provider:'log'}; }
-}
-
 export class ResendEmailProvider implements EmailProvider {
   constructor(private readonly apiKey:string, private readonly from:string) {}
   async send(input:SendEmailInput):Promise<EmailResult> {
@@ -53,8 +49,25 @@ export class GitHubAppClient {
     if(response.status===403 && response.headers.get('x-ratelimit-remaining')==='0') throw new Error(`GitHub rate limit reached; resets at ${response.headers.get('x-ratelimit-reset') ?? 'unknown'}`);
     if(!response.ok) throw new Error(`GitHub API failed (${response.status})`); return response.json() as Promise<T>;
   }
+  async requestText(method:string,path:string,accept:string):Promise<string> {
+    const token=await this.installationToken();
+    const response=await fetch(`https://api.github.com${path}`,{method,headers:{authorization:`Bearer ${token}`,accept,'user-agent':'trigg/0.1','x-github-api-version':'2022-11-28'}});
+    if(response.status===403&&response.headers.get('x-ratelimit-remaining')==='0')throw new Error(`GitHub rate limit reached; resets at ${response.headers.get('x-ratelimit-reset')??'unknown'}`);
+    if(!response.ok)throw new Error(`GitHub API failed (${response.status})`);
+    return response.text();
+  }
+  listOpenPullRequests(repository:string){return this.request<Array<{number:number;title:string;body:string|null;html_url:string;user:{login:string};base:{ref:string};head:{ref:string}}>>('GET',`/repos/${repository}/pulls?state=open&sort=updated&direction=desc&per_page=1`);}
+  pullRequestDiff(repository:string,number:number){return this.requestText('GET',`/repos/${repository}/pulls/${number}`,'application/vnd.github.diff');}
   comment(repository:string,issueNumber:number,body:string){return this.request('POST',`/repos/${repository}/issues/${issueNumber}/comments`,{body});}
   createIssue(repository:string,title:string,body:string,labels?:string[]){return this.request('POST',`/repos/${repository}/issues`,{title,body,labels});}
+}
+
+export type GitHubPullRequestContext = {repository:string;repositoryId:string;prNumber:number;title:string;body:string;author:string;action:string;baseBranch:string;headBranch:string;url:string};
+export function normalizePullRequestEvent(payload:Record<string,unknown>):GitHubPullRequestContext {
+  const repository=payload.repository as {id?:number;full_name?:string}|undefined;
+  const pullRequest=payload.pull_request as {number?:number;title?:string;body?:string|null;html_url?:string;user?:{login?:string};base?:{ref?:string};head?:{ref?:string}}|undefined;
+  if(!repository?.full_name||!repository.id||!pullRequest?.number)throw new Error('Invalid GitHub pull request payload');
+  return {repository:repository.full_name,repositoryId:String(repository.id),prNumber:pullRequest.number,title:pullRequest.title??'',body:pullRequest.body??'',author:pullRequest.user?.login??'',action:String(payload.action??''),baseBranch:pullRequest.base?.ref??'',headBranch:pullRequest.head?.ref??'',url:pullRequest.html_url??''};
 }
 
 export function assertSafeHttpUrl(raw:string):URL {

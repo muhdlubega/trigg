@@ -2,17 +2,17 @@ import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { z } from 'zod';
-import { CodeReviewSchema, MockAIProvider, WorkersAIProvider, type AIProvider } from '@trigg/ai';
-import { GitHubAppClient, LogEmailProvider, ResendEmailProvider, assertSafeHttpUrl, verifyGitHubSignature } from '@trigg/integrations';
+import { CodeReviewSchema, FallbackAIProvider, GeminiProvider, MistralProvider, type AIProvider, type CodeReview } from '@trigg/ai';
+import { GitHubAppClient, ResendEmailProvider, assertSafeHttpUrl, normalizePullRequestEvent, verifyGitHubSignature } from '@trigg/integrations';
 import { WORKFLOW_TEMPLATES, workflowDefinitionSchema, type ApiError, type ApiResponse, type WorkflowDefinition, type WorkflowNode } from '@trigg/shared';
 import { executeWorkflow, type ExecutionContext, type NodeExecutor } from '@trigg/workflow-engine';
 
 type Variables = { user: { id:string; firebaseUid:string; email:string; displayName?:string; photoUrl?:string } };
 type Bindings = Env & {
   FIREBASE_PROJECT_ID?:string; GITHUB_APP_ID?:string; GITHUB_PRIVATE_KEY?:string; GITHUB_WEBHOOK_SECRET?:string;
-  GITHUB_APP_SLUG?:string; RESEND_API_KEY?:string; GEMINI_API_KEY?:string; MISTRAL_API_KEY?:string;
+  GITHUB_APP_SLUG?:string; RESEND_API_KEY?:string; GEMINI_API_KEY?:string; MISTRAL_API_KEY?:string; MISTRAL_MODEL?:string; GEMINI_MODEL?:string;
 };
-type QueueMessage = {kind:'github-event';eventId:string}|{kind:'workflow-run';workflowId:string;userId:string;input:ExecutionContext;mode:'LIVE'|'TEST'};
+type QueueMessage = {kind:'github-event';eventId:string}|{kind:'workflow-run';workflowId:string;userId:string;input:ExecutionContext;mode:'LIVE'};
 type AppContext = Context<{Bindings:Bindings;Variables:Variables}>;
 const app = new Hono<{Bindings:Bindings;Variables:Variables}>();
 
@@ -25,7 +25,6 @@ const parseJson=<T>(value:string|null,fallback:T):T=>{try{return value?JSON.pars
 app.use('*', async (c,next) => cors({origin:(origin)=>origin && c.env.ALLOWED_ORIGINS.split(',').map((item)=>item.trim()).includes(origin)?origin:'',allowHeaders:['Authorization','Content-Type','X-Trigg-Secret'],allowMethods:['GET','POST','PATCH','DELETE','OPTIONS'],credentials:true})(c,next));
 
 async function authenticate(token:string,env:Bindings) {
-  if(env.TRIGG_MOCK_MODE==='true' && token==='mock-token') return {firebaseUid:'mock-user',email:'developer@trigg.local',displayName:'Trigg Developer'};
   if(!env.FIREBASE_PROJECT_ID) throw new Error('Firebase is not configured');
   const jwks=createRemoteJWKSet(new URL('https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com'));
   const {payload}=await jwtVerify(token,jwks,{issuer:`https://securetoken.google.com/${env.FIREBASE_PROJECT_ID}`,audience:env.FIREBASE_PROJECT_ID});
@@ -50,50 +49,66 @@ app.get('/api/node-definitions',async(c)=>c.json(ok({templates:WORKFLOW_TEMPLATE
 
 app.get('/api/dashboard',async(c)=>{
   const user=c.get('user');
-  const [workflows,executions,ai,recent]=await Promise.all([
+  const [workflows,executions,ai,recent,active]=await Promise.all([
     c.env.DB.prepare('SELECT COUNT(*) total FROM workflows WHERE user_id=? AND enabled=1').bind(user.id).first<{total:number}>(),
     c.env.DB.prepare("SELECT COUNT(*) total, SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) successful FROM workflow_executions WHERE user_id=? AND date(started_at)=date('now')").bind(user.id).first<{total:number;successful:number}>(),
     c.env.DB.prepare("SELECT COUNT(*) requests, COALESCE(SUM(input_tokens+output_tokens),0) tokens FROM ai_usage a JOIN workflow_executions e ON e.id=a.execution_id WHERE e.user_id=? AND date(a.created_at)=date('now')").bind(user.id).first<{requests:number;tokens:number}>(),
     c.env.DB.prepare('SELECT e.*,w.name workflow_name FROM workflow_executions e JOIN workflows w ON w.id=e.workflow_id WHERE e.user_id=? ORDER BY e.started_at DESC LIMIT 5').bind(user.id).all(),
+    c.env.DB.prepare('SELECT w.id,w.name,r.full_name repository FROM workflows w JOIN repositories r ON r.id=w.repository_id WHERE w.user_id=? AND w.enabled=1 ORDER BY w.updated_at DESC').bind(user.id).all(),
   ]);
-  const total=executions?.total??0; return c.json(ok({activeWorkflows:workflows?.total??0,executionsToday:total,successRate:total?Math.round(((executions?.successful??0)/total)*100):100,aiRuns:ai?.requests??0,aiTokens:ai?.tokens??0,recent:recent.results}));
+  const total=executions?.total??0; return c.json(ok({activeWorkflows:workflows?.total??0,executionsToday:total,successRate:total?Math.round(((executions?.successful??0)/total)*100):0,aiRuns:ai?.requests??0,aiTokens:ai?.tokens??0,recent:recent.results,active:active.results}));
 });
 
-app.get('/api/workflows',async(c)=>{const result=await c.env.DB.prepare('SELECT w.*, COUNT(e.id) run_count FROM workflows w LEFT JOIN workflow_executions e ON e.workflow_id=w.id WHERE w.user_id=? GROUP BY w.id ORDER BY w.updated_at DESC').bind(c.get('user').id).all();return c.json(ok(result.results));});
+app.get('/api/workflows',async(c)=>{const result=await c.env.DB.prepare('SELECT w.*,r.full_name repository,COUNT(e.id) run_count FROM workflows w LEFT JOIN repositories r ON r.id=w.repository_id LEFT JOIN workflow_executions e ON e.workflow_id=w.id WHERE w.user_id=? GROUP BY w.id ORDER BY w.updated_at DESC').bind(c.get('user').id).all();return c.json(ok(result.results));});
 app.post('/api/workflows',async(c)=>{
   const body=workflowDefinitionSchema.omit({id:true,version:true}).extend({id:z.string().optional(),version:z.number().optional()}).parse(await c.req.json());
   const definition:WorkflowDefinition={...body,id:body.id??uuid('wf'),version:body.version??1}; const trigger=definition.nodes.find((node)=>node.category==='trigger'); if(!trigger)return fail('INVALID_WORKFLOW','A trigger is required');
+  if(trigger.type==='trigger.github'&&!definition.repositoryId)return fail('REPOSITORY_REQUIRED','Choose a repository for this workflow');
+  if(definition.repositoryId){const repository=await c.env.DB.prepare('SELECT id FROM repositories WHERE id=? AND user_id=?').bind(definition.repositoryId,c.get('user').id).first();if(!repository)return fail('INVALID_REPOSITORY','Repository not found',404);}
   const timestamp=now(); const webhookId=trigger.type==='trigger.webhook'?uuid('hook'):null;
   await c.env.DB.batch([
-    c.env.DB.prepare('INSERT INTO workflows (id,user_id,name,description,enabled,current_version,trigger_type,trigger_event,trigger_action,webhook_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').bind(definition.id,c.get('user').id,definition.name,definition.description,definition.enabled?1:0,1,trigger.type,String(trigger.config.event??''),String(trigger.config.action??''),webhookId,timestamp,timestamp),
+    c.env.DB.prepare('INSERT INTO workflows (id,user_id,repository_id,name,description,enabled,current_version,trigger_type,trigger_event,trigger_action,webhook_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(definition.id,c.get('user').id,definition.repositoryId??null,definition.name,definition.description,definition.enabled?1:0,1,trigger.type,String(trigger.config.event??''),String(trigger.config.action??''),webhookId,timestamp,timestamp),
     c.env.DB.prepare('INSERT INTO workflow_versions (id,workflow_id,version,definition_json,created_at) VALUES (?,?,?,?,?)').bind(uuid('wfv'),definition.id,1,JSON.stringify(definition),timestamp),
   ]);
   return c.json(ok({...definition,webhookId}),201);
 });
 
-async function ownedWorkflow(env:Bindings,userId:string,id:string){return env.DB.prepare('SELECT w.*,v.definition_json FROM workflows w JOIN workflow_versions v ON v.workflow_id=w.id AND v.version=w.current_version WHERE w.id=? AND w.user_id=?').bind(id,userId).first<Record<string,string|number>>();}
+async function ownedWorkflow(env:Bindings,userId:string,id:string){return env.DB.prepare('SELECT w.*,v.definition_json,r.full_name repository,gi.installation_id github_installation_id FROM workflows w JOIN workflow_versions v ON v.workflow_id=w.id AND v.version=w.current_version LEFT JOIN repositories r ON r.id=w.repository_id LEFT JOIN github_installations gi ON gi.id=r.installation_id WHERE w.id=? AND w.user_id=?').bind(id,userId).first<Record<string,string|number>>();}
 app.get('/api/workflows/:id',async(c)=>{const row=await ownedWorkflow(c.env,c.get('user').id,c.req.param('id'));return row?c.json(ok({...parseJson<WorkflowDefinition>(String(row.definition_json),{} as WorkflowDefinition),webhookId:row.webhook_id})):fail('NOT_FOUND','Workflow not found',404);});
 app.patch('/api/workflows/:id',async(c)=>{
   const current=await ownedWorkflow(c.env,c.get('user').id,c.req.param('id')); if(!current)return fail('NOT_FOUND','Workflow not found',404);
   const body=workflowDefinitionSchema.parse(await c.req.json()); const version=Number(current.current_version)+1; const definition={...body,id:c.req.param('id'),version}; const trigger=definition.nodes.find((node)=>node.category==='trigger'); if(!trigger)return fail('INVALID_WORKFLOW','A trigger is required');
+  if(trigger.type==='trigger.github'&&!definition.repositoryId)return fail('REPOSITORY_REQUIRED','Choose a repository for this workflow');
+  if(definition.repositoryId){const repository=await c.env.DB.prepare('SELECT id FROM repositories WHERE id=? AND user_id=?').bind(definition.repositoryId,c.get('user').id).first();if(!repository)return fail('INVALID_REPOSITORY','Repository not found',404);}
   await c.env.DB.batch([
-    c.env.DB.prepare('UPDATE workflows SET name=?,description=?,enabled=?,current_version=?,trigger_type=?,trigger_event=?,trigger_action=?,updated_at=? WHERE id=? AND user_id=?').bind(definition.name,definition.description,definition.enabled?1:0,version,trigger.type,String(trigger.config.event??''),String(trigger.config.action??''),now(),definition.id,c.get('user').id),
+    c.env.DB.prepare('UPDATE workflows SET repository_id=?,name=?,description=?,enabled=?,current_version=?,trigger_type=?,trigger_event=?,trigger_action=?,updated_at=? WHERE id=? AND user_id=?').bind(definition.repositoryId??null,definition.name,definition.description,definition.enabled?1:0,version,trigger.type,String(trigger.config.event??''),String(trigger.config.action??''),now(),definition.id,c.get('user').id),
     c.env.DB.prepare('INSERT INTO workflow_versions (id,workflow_id,version,definition_json,created_at) VALUES (?,?,?,?,?)').bind(uuid('wfv'),definition.id,version,JSON.stringify(definition),now()),
   ]); return c.json(ok(definition));
 });
 app.delete('/api/workflows/:id',async(c)=>{const result=await c.env.DB.prepare('DELETE FROM workflows WHERE id=? AND user_id=?').bind(c.req.param('id'),c.get('user').id).run();return result.meta.changes?c.json(ok({deleted:true})):fail('NOT_FOUND','Workflow not found',404);});
 app.post('/api/workflows/:id/activate',async(c)=>toggle(c,true)); app.post('/api/workflows/:id/deactivate',async(c)=>toggle(c,false));
 async function toggle(c:AppContext,enabled:boolean){const user=c.get('user');const result=await c.env.DB.prepare('UPDATE workflows SET enabled=?,updated_at=? WHERE id=? AND user_id=?').bind(enabled?1:0,now(),c.req.param('id'),user.id).run();return result.meta.changes?c.json(ok({enabled})):fail('NOT_FOUND','Workflow not found',404);}
-app.post('/api/workflows/:id/test',async(c)=>{const row=await ownedWorkflow(c.env,c.get('user').id,c.req.param('id'));if(!row)return fail('NOT_FOUND','Workflow not found',404);const input=await c.req.json().catch(()=>({}));await c.env.WORKFLOW_QUEUE.send({kind:'workflow-run',workflowId:c.req.param('id'),userId:c.get('user').id,input,mode:'TEST'} satisfies QueueMessage);return c.json(ok({queued:true}),202);});
+app.post('/api/workflows/:id/run',async(c)=>{
+  const user=c.get('user');const row=await ownedWorkflow(c.env,user.id,c.req.param('id'));if(!row)return fail('NOT_FOUND','Workflow not found',404);
+  if(!row.repository||!row.github_installation_id)return fail('REPOSITORY_REQUIRED','Connect a GitHub repository to run this workflow');
+  if(!c.env.GITHUB_APP_ID||!c.env.GITHUB_PRIVATE_KEY)return fail('NOT_CONFIGURED','GitHub App credentials are not configured',500);
+  const client=new GitHubAppClient(c.env.GITHUB_APP_ID,c.env.GITHUB_PRIVATE_KEY,String(row.github_installation_id));const pulls=await client.listOpenPullRequests(String(row.repository));const pull=pulls[0];
+  if(!pull)return fail('NO_OPEN_PULL_REQUESTS','This repository has no open pull requests',404);
+  const github={repository:String(row.repository),repositoryId:String(row.repository_id),prNumber:pull.number,title:pull.title,body:pull.body??'',author:pull.user.login,action:'manual',baseBranch:pull.base.ref,headBranch:pull.head.ref,url:pull.html_url};
+  await c.env.WORKFLOW_QUEUE.send({kind:'workflow-run',workflowId:c.req.param('id'),userId:user.id,input:{github,installationId:String(row.github_installation_id)},mode:'LIVE'} satisfies QueueMessage);
+  return c.json(ok({queued:true,pullRequest:pull.number}),202);
+});
 
 app.get('/api/executions',async(c)=>{const result=await c.env.DB.prepare('SELECT e.*,w.name workflow_name FROM workflow_executions e JOIN workflows w ON w.id=e.workflow_id WHERE e.user_id=? ORDER BY e.started_at DESC LIMIT 100').bind(c.get('user').id).all();return c.json(ok(result.results));});
 app.get('/api/executions/:id',async(c)=>{const execution=await c.env.DB.prepare('SELECT e.*,w.name workflow_name,v.definition_json FROM workflow_executions e JOIN workflows w ON w.id=e.workflow_id JOIN workflow_versions v ON v.workflow_id=e.workflow_id AND v.version=e.workflow_version WHERE e.id=? AND e.user_id=?').bind(c.req.param('id'),c.get('user').id).first();if(!execution)return fail('NOT_FOUND','Execution not found',404);const nodes=await c.env.DB.prepare('SELECT * FROM node_executions WHERE execution_id=? ORDER BY started_at').bind(c.req.param('id')).all();const usage=await c.env.DB.prepare('SELECT * FROM ai_usage WHERE execution_id=?').bind(c.req.param('id')).all();return c.json(ok({execution,nodes:nodes.results,aiUsage:usage.results}));});
 
 app.get('/api/integrations/github',async(c)=>{const installs=await c.env.DB.prepare('SELECT g.*,COUNT(r.id) repository_count FROM github_installations g LEFT JOIN repositories r ON r.installation_id=g.id WHERE g.user_id=? GROUP BY g.id').bind(c.get('user').id).all();return c.json(ok({configured:Boolean(c.env.GITHUB_APP_ID),appSlug:c.env.GITHUB_APP_SLUG??null,installations:installs.results}));});
 app.get('/api/github/repositories',async(c)=>{const result=await c.env.DB.prepare('SELECT * FROM repositories WHERE user_id=? ORDER BY full_name').bind(c.get('user').id).all();return c.json(ok(result.results));});
-app.post('/api/integrations/github/connect',async(c)=>{if(!c.env.GITHUB_APP_SLUG)return fail('NOT_CONFIGURED','GitHub App slug is not configured');return c.json(ok({url:`https://github.com/apps/${c.env.GITHUB_APP_SLUG}/installations/new?state=${encodeURIComponent(c.get('user').id)}`}));});
+app.post('/api/integrations/github/connect',async(c)=>{if(!c.env.GITHUB_APP_SLUG)return fail('NOT_CONFIGURED','GitHub App slug is not configured');const state=crypto.randomUUID();const timestamp=now();await c.env.DB.prepare("DELETE FROM integration_connections WHERE user_id=? AND provider='github_pending'").bind(c.get('user').id).run();await c.env.DB.prepare('INSERT INTO integration_connections (id,user_id,provider,status,config_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?)').bind(uuid('conn'),c.get('user').id,'github_pending','pending',JSON.stringify({state,expiresAt:Date.now()+15*60*1000}),timestamp,timestamp).run();return c.json(ok({url:`https://github.com/apps/${c.env.GITHUB_APP_SLUG}/installations/new?state=${encodeURIComponent(state)}`}));});
 app.post('/api/integrations/github/callback',async(c)=>{
-  const {installationId}=z.object({installationId:z.coerce.string().min(1)}).parse(await c.req.json());
+  const {installationId,state}=z.object({installationId:z.coerce.string().min(1),state:z.string().min(1)}).parse(await c.req.json());
+  const pending=await c.env.DB.prepare("SELECT id,config_json FROM integration_connections WHERE user_id=? AND provider='github_pending' AND status='pending' ORDER BY created_at DESC LIMIT 1").bind(c.get('user').id).first<{id:string;config_json:string}>();const pendingConfig=parseJson<{state:string;expiresAt:number}>(pending?.config_json??null,{state:'',expiresAt:0});
+  if(!pending||pendingConfig.state!==state||pendingConfig.expiresAt<Date.now())return fail('INVALID_STATE','GitHub connection expired. Start the connection again.',401);
   if(!c.env.GITHUB_APP_ID||!c.env.GITHUB_PRIVATE_KEY)return fail('NOT_CONFIGURED','GitHub App credentials are not configured',500);
   const client=new GitHubAppClient(c.env.GITHUB_APP_ID,c.env.GITHUB_PRIVATE_KEY,installationId);
   const result=await client.request<{repositories:Array<{id:number;full_name:string;private:boolean;default_branch:string;owner:{login:string}}>}>('GET','/installation/repositories');
@@ -101,6 +116,7 @@ app.post('/api/integrations/github/callback',async(c)=>{
   await c.env.DB.prepare('INSERT INTO github_installations (id,user_id,installation_id,account_login,account_type,created_at,updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(installation_id) DO UPDATE SET user_id=excluded.user_id,account_login=excluded.account_login,updated_at=excluded.updated_at').bind(localInstallationId,user.id,installationId,accountLogin,'User',timestamp,timestamp).run();
   const installed=await c.env.DB.prepare('SELECT id FROM github_installations WHERE installation_id=? AND user_id=?').bind(installationId,user.id).first<{id:string}>();
   for(const repository of result.repositories)await c.env.DB.prepare('INSERT INTO repositories (id,user_id,installation_id,github_repository_id,full_name,private,default_branch,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,github_repository_id) DO UPDATE SET installation_id=excluded.installation_id,full_name=excluded.full_name,private=excluded.private,default_branch=excluded.default_branch,updated_at=excluded.updated_at').bind(uuid('repo'),user.id,installed?.id??localInstallationId,String(repository.id),repository.full_name,repository.private?1:0,repository.default_branch,timestamp,timestamp).run();
+  await c.env.DB.prepare('DELETE FROM integration_connections WHERE id=?').bind(pending.id).run();
   return c.json(ok({connected:true,repositories:result.repositories.length}));
 });
 
@@ -122,16 +138,18 @@ app.all('/hooks/:webhookId',async(c)=>{
   const contentType=c.req.header('content-type')??''; const input=contentType.includes('application/json')?await c.req.json():{body:await c.req.text()}; await c.env.WORKFLOW_QUEUE.send({kind:'workflow-run',workflowId:String(row.id),userId:String(row.user_id),input:{[trigger?.id??'webhook']:input},mode:'LIVE'} satisfies QueueMessage); return c.json(ok({accepted:true}),202);
 });
 
-function aiProvider(env:Bindings):AIProvider{return env.TRIGG_MOCK_MODE==='true'?new MockAIProvider():new WorkersAIProvider(env.AI,env.AI_MODEL);}
+function aiProvider(env:Bindings):AIProvider{if(!env.MISTRAL_API_KEY||!env.GEMINI_API_KEY)throw new Error('Mistral and Gemini API keys are required');return new FallbackAIProvider(new MistralProvider(env.MISTRAL_API_KEY,env.MISTRAL_MODEL),new GeminiProvider(env.GEMINI_API_KEY,env.GEMINI_MODEL));}
+function reviewComment(review:CodeReview){const findings=review.findings.length?review.findings.map((finding,index)=>`${index+1}. **${finding.severity.toUpperCase()}: ${finding.title}**${finding.file?` — \`${finding.file}${finding.line?`:${finding.line}`:''}\``:''}\n   ${finding.description}`).join('\n'):'No material issues found.';return `## Trigg code review\n\n${review.summary}\n\n**Risk:** ${review.riskScore}/100 (${review.severity})  \n**Recommendation:** ${review.recommendation.replace('_',' ')}\n\n### Findings\n${findings}\n\n<sub>Reviewed by Trigg using Mistral with Gemini fallback.</sub>`;}
 function executors(env:Bindings,executionId:string,installationId?:string):Record<string,NodeExecutor>{
   const ai=aiProvider(env);
-  const runAI=async(node:WorkflowNode,context:ExecutionContext,structured=false)=>{const request={prompt:`${String(node.config.prompt??'Analyze the following event')}\n${JSON.stringify(context).slice(0,60000)}`};if(structured){const result=await ai.generateStructured(request,CodeReviewSchema);await recordAI(env,executionId,node.id,result.usage);return result.data;}const result=await ai.generate(request);await recordAI(env,executionId,node.id,result);return {text:result.text};};
   const github=installationId&&env.GITHUB_APP_ID&&env.GITHUB_PRIVATE_KEY?new GitHubAppClient(env.GITHUB_APP_ID,env.GITHUB_PRIVATE_KEY,installationId):null;
+  const runAI=async(node:WorkflowNode,context:ExecutionContext)=>{const request={prompt:`${String(node.config.prompt??'Analyze the following event')}\n${JSON.stringify(context).slice(0,60000)}`};const result=await ai.generate(request);await recordAI(env,executionId,node.id,result);return {text:result.text};};
+  const codeReview=async(node:WorkflowNode,context:ExecutionContext)=>{if(!github)throw new Error('GitHub App installation is required');const pr=context.github as {repository?:string;prNumber?:number;title?:string;body?:string};if(!pr?.repository||!pr.prNumber)throw new Error('Pull request context is missing');const rawDiff=await github.pullRequestDiff(pr.repository,pr.prNumber);const truncated=rawDiff.length>60000;const diff=rawDiff.slice(0,60000);const prompt=`Review this pull request diff. Focus on concrete bugs, security issues, reliability problems, and significant regressions. Ignore style-only preferences. If no material issue exists, return an empty findings array. Return JSON with summary, riskScore (0-100), severity, findings, and recommendation.\n\nPR title: ${pr.title??''}\nPR description: ${pr.body??''}\nDiff${truncated?' (truncated to 60,000 characters)':''}:\n${diff}`;const result=await ai.generateStructured({prompt},CodeReviewSchema);await recordAI(env,executionId,node.id,result.usage);return {...result.data,comment:reviewComment(result.data)};};
   return {
-    'ai.prompt':(node,context)=>runAI(node,context),'ai.classifier':(node,context)=>runAI(node,context),'ai.extract':(node,context)=>runAI(node,context),'ai.summarize':(node,context)=>runAI(node,context),'ai.agent':(node,context)=>runAI(node,context),'ai.codeReview':(node,context)=>runAI(node,context,true),
+    'ai.prompt':(node,context)=>runAI(node,context),'ai.classifier':(node,context)=>runAI(node,context),'ai.extract':(node,context)=>runAI(node,context),'ai.summarize':(node,context)=>runAI(node,context),'ai.agent':(node,context)=>runAI(node,context),'ai.codeReview':codeReview,
     'logic.transform':async(node)=>node.config.mapping,'logic.delay':async(node)=>({waitingSeconds:node.config.seconds}),
     'action.save':async(node)=>node.config.value,
-    'action.email':async(node)=>{const provider=env.RESEND_API_KEY&&env.TRIGG_MOCK_MODE!=='true'?new ResendEmailProvider(env.RESEND_API_KEY,env.EMAIL_FROM):new LogEmailProvider();const result=await provider.send({to:String(node.config.to),subject:String(node.config.subject),body:String(node.config.body)});await env.DB.prepare('INSERT INTO email_logs (id,execution_id,recipient_masked,provider,status,created_at) VALUES (?,?,?,?,?,?)').bind(uuid('email'),executionId,String(node.config.to).replace(/^(.{2}).+(@.+)$/,'$1***$2'),result.provider,'sent',now()).run();return result;},
+    'action.email':async(node)=>{if(!env.RESEND_API_KEY)throw new Error('Resend is not configured');const provider=new ResendEmailProvider(env.RESEND_API_KEY,env.EMAIL_FROM);const result=await provider.send({to:String(node.config.to),subject:String(node.config.subject),body:String(node.config.body)});await env.DB.prepare('INSERT INTO email_logs (id,execution_id,recipient_masked,provider,status,created_at) VALUES (?,?,?,?,?,?)').bind(uuid('email'),executionId,String(node.config.to).replace(/^(.{2}).+(@.+)$/,'$1***$2'),result.provider,'sent',now()).run();return result;},
     'action.githubComment':async(node)=>{if(!github)throw new Error('GitHub App installation is required');return github.comment(String(node.config.repository),Number(node.config.issueNumber),String(node.config.body));},
     'action.githubIssue':async(node)=>{if(!github)throw new Error('GitHub App installation is required');return github.createIssue(String(node.config.repository),String(node.config.title),String(node.config.body),node.config.labels as string[]|undefined);},
     'action.http':async(node)=>{const url=assertSafeHttpUrl(String(node.config.url));const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),Number(node.config.timeout??10000));const method=String(node.config.method);try{const response=await fetch(url,{method,...(node.config.headers?{headers:node.config.headers as Record<string,string>}:{}),...(['GET','HEAD'].includes(method)?{}:{body:String(node.config.body??'')}),signal:controller.signal,redirect:'error'});return {status:response.status,ok:response.ok,body:(await response.text()).slice(0,10000)};}finally{clearTimeout(timer);}},
@@ -150,8 +168,9 @@ async function runWorkflow(env:Bindings,message:Extract<QueueMessage,{kind:'work
 
 async function processGitHubEvent(env:Bindings,eventId:string){
   const event=await env.DB.prepare('SELECT * FROM webhook_events WHERE id=?').bind(eventId).first<Record<string,string>>();if(!event)return;
-  const payload=parseJson<Record<string,unknown>>(event.payload_json??null,{}); const workflows=await env.DB.prepare("SELECT w.*,r.github_repository_id FROM workflows w LEFT JOIN repositories r ON r.id=w.repository_id WHERE w.enabled=1 AND w.trigger_type='trigger.github' AND w.trigger_event=? AND (w.trigger_action=? OR w.trigger_action='') AND (r.github_repository_id=? OR w.repository_id IS NULL)").bind(event.event??'',event.action??'',event.repository_id??'').all<Record<string,string>>();
-  for(const workflow of workflows.results){await runWorkflow(env,{kind:'workflow-run',workflowId:String(workflow.id),userId:String(workflow.user_id),input:{github:payload,installationId:event.installation_id,event:event.event,action:event.action},mode:'LIVE'});}
+  if(event.event!=='pull_request'){await env.DB.prepare("UPDATE webhook_events SET status='ignored',processed_at=? WHERE id=?").bind(now(),eventId).run();return;}
+  const payload=parseJson<Record<string,unknown>>(event.payload_json??null,{});const github=normalizePullRequestEvent(payload);const workflows=await env.DB.prepare("SELECT w.*,r.github_repository_id FROM workflows w JOIN repositories r ON r.id=w.repository_id WHERE w.enabled=1 AND w.trigger_type='trigger.github' AND w.trigger_event='pull_request' AND (w.trigger_action=? OR w.trigger_action='') AND r.github_repository_id=?").bind(event.action??'',event.repository_id??'').all<Record<string,string>>();
+  for(const workflow of workflows.results){await runWorkflow(env,{kind:'workflow-run',workflowId:String(workflow.id),userId:String(workflow.user_id),input:{github,installationId:event.installation_id},mode:'LIVE'});}
   await env.DB.prepare("UPDATE webhook_events SET status='processed',processed_at=? WHERE id=?").bind(now(),eventId).run();
 }
 

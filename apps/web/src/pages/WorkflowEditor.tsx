@@ -140,22 +140,13 @@ export function WorkflowEditor() {
       setTimeout(() => setNotice(''), 2200);
     },
   });
-  const test = useMutation({
+  const run = useMutation({
     mutationFn: () =>
-      api<{ queued: boolean }>(`/api/workflows/${id}/test`, {
+      api<{ queued: boolean; pullRequest: number }>(`/api/workflows/${id}/run`, {
         method: 'POST',
-        body: JSON.stringify({
-          manual: { message: 'Hello from Trigg', score: 82 },
-          github: {
-            repository: 'example/api',
-            prNumber: 142,
-            title: 'Improve webhook security',
-            diff: '+ validate signature',
-          },
-        }),
       }),
-    onSuccess: () => {
-      setNotice('Test execution queued');
+    onSuccess: ({pullRequest}) => {
+      setNotice(`Review queued for PR #${pullRequest}`);
       setTimeout(() => setNotice(''), 2200);
     },
   });
@@ -276,11 +267,11 @@ export function WorkflowEditor() {
         <div className="editor-actions">
           <button
             className="button"
-            onClick={() => test.mutate()}
-            disabled={test.isPending}
+            onClick={() => run.mutate()}
+            disabled={run.isPending || dirty}
           >
             <Play size={14} />
-            Run test
+            Run latest PR
           </button>
           <button
             className="button primary"
@@ -433,7 +424,7 @@ export function WorkflowEditor() {
         <aside className="inspector empty-inspector">
           <Settings2 />
           <h3>Node settings</h3>
-          <p>Select a node to configure it and inspect sample outputs.</p>
+          <p>Select a node to configure it.</p>
         </aside>
       )}
     </div>
@@ -493,13 +484,6 @@ function NodeInspector({
           }}
         />
       </label>
-      <section className="sample-output">
-        <header>
-          <b>Sample output</b>
-          <span>TEST DATA</span>
-        </header>
-        <pre>{JSON.stringify(sampleOutput(node.type), null, 2)}</pre>
-      </section>
       <div className="inspector-actions">
         <button onClick={duplicate}>
           <Copy size={14} />
@@ -537,17 +521,4 @@ function defaultConfig(type: string): Record<string, unknown> {
     return { event: 'pull_request', action: 'opened' };
   if (type === 'trigger.webhook') return { auth: 'secret' };
   return {};
-}
-function sampleOutput(type: string) {
-  if (type === 'ai.codeReview')
-    return {
-      summary: 'Potential error handling gap.',
-      riskScore: 82,
-      severity: 'high',
-      recommendation: 'request_changes',
-    };
-  if (type === 'logic.condition') return { result: true };
-  if (type.startsWith('trigger.github'))
-    return { repository: 'example/api', prNumber: 142, action: 'opened' };
-  return { success: true, id: 'sample_123' };
 }

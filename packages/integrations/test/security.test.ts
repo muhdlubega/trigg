@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertSafeHttpUrl, verifyGitHubSignature } from '../src';
+import { assertSafeHttpUrl, normalizePullRequestEvent, verifyGitHubSignature } from '../src';
 
 describe('integration security', () => {
   it('accepts a valid GitHub HMAC and rejects tampering', async () => {
@@ -17,5 +17,9 @@ describe('integration security', () => {
     expect(() => assertSafeHttpUrl('https://127.0.0.1/admin')).toThrow('blocked');
     expect(() => assertSafeHttpUrl('https://192.168.1.4/hook')).toThrow('blocked');
     expect(assertSafeHttpUrl('https://example.com/hook').hostname).toBe('example.com');
+  });
+
+  it('normalizes a real GitHub pull request webhook shape', () => {
+    expect(normalizePullRequestEvent({action:'opened',repository:{id:42,full_name:'owner/repo'},pull_request:{number:7,title:'Fix',body:null,html_url:'https://github.com/owner/repo/pull/7',user:{login:'octocat'},base:{ref:'main'},head:{ref:'fix'}}})).toEqual({repository:'owner/repo',repositoryId:'42',prNumber:7,title:'Fix',body:'',author:'octocat',action:'opened',baseBranch:'main',headBranch:'fix',url:'https://github.com/owner/repo/pull/7'});
   });
 });

@@ -7,10 +7,10 @@
   "workers_dev":true,
   "vars":{
     "ENVIRONMENT":"production",
-    "TRIGG_MOCK_MODE":"true",
     "ALLOWED_ORIGINS":"http://localhost:5173,https://trigg.pages.dev",
     "WEB_URL":"https://trigg.pages.dev",
-    "AI_MODEL":"@cf/meta/llama-3.1-8b-instruct",
+    "MISTRAL_MODEL":"mistral-large-latest",
+    "GEMINI_MODEL":"gemini-2.5-flash",
     "EMAIL_FROM":"Trigg <automation@example.com>",
     "FREE_DAILY_RUN_LIMIT":"100",
     "FREE_DAILY_AI_LIMIT":"50"
@@ -20,6 +20,5 @@
     "producers":[{"binding":"WORKFLOW_QUEUE","queue":"trigg-workflows"}],
     "consumers":[{"queue":"trigg-workflows","max_batch_size":5,"max_batch_timeout":5,"max_retries":3,"dead_letter_queue":"trigg-workflows-dlq"}]
   },
-  "ai":{"binding":"AI"},
   "observability":{"enabled":true,"head_sampling_rate":1}
 }
