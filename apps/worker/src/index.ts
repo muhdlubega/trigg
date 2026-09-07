@@ -36,7 +36,7 @@ async function syncGitHubRepositories(env:Bindings,userId:string,localInstallati
 
 function reviewerDefinition(id:string,repositoryId:string,repository:string,version:number,settings:ReviewerSettings):WorkflowDefinition{return {id,repositoryId,name:`AI review · ${repository}`,description:'AI code review for newly opened pull requests',enabled:settings.enabled,version,nodes:[{id:'github',type:'trigger.github',name:'PR opened',category:'trigger',position:{x:0,y:0},config:{event:'pull_request',action:'opened',branches:settings.branches}},{id:'review',type:'ai.codeReview',name:'AI review',category:'ai',position:{x:0,y:0},config:{responseFormat:settings.responseFormat,focus:settings.focus,commentMode:settings.commentMode}},{id:'comment',type:'action.githubComment',name:'Post review',category:'action',position:{x:0,y:0},config:{repository:'{{github.repository}}',issueNumber:'{{github.prNumber}}',body:'{{review.comment}}'}}],edges:[{id:'e1',source:'github',target:'review'},{id:'e2',source:'review',target:'comment'}]};}
 
-app.use('*', async (c,next) => cors({origin:(origin)=>origin && c.env.ALLOWED_ORIGINS.split(',').map((item)=>item.trim()).includes(origin)?origin:'',allowHeaders:['Authorization','Content-Type','X-Trigg-Secret'],allowMethods:['GET','POST','PATCH','DELETE','OPTIONS'],credentials:true})(c,next));
+app.use('*', async (c,next) => cors({origin:(origin)=>origin && c.env.ALLOWED_ORIGINS.split(',').map((item)=>item.trim()).includes(origin)?origin:'',allowHeaders:['Authorization','Content-Type','X-Trigg-Secret'],allowMethods:['GET','POST','PUT','PATCH','DELETE','OPTIONS'],credentials:true})(c,next));
 
 async function authenticate(token:string,env:Bindings) {
   if(!env.FIREBASE_PROJECT_ID) throw new Error('Firebase is not configured');
