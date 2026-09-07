@@ -28,8 +28,8 @@ async function authenticate(token:string,env:Bindings) {
   if(!env.FIREBASE_PROJECT_ID) throw new Error('Firebase is not configured');
   const jwks=createRemoteJWKSet(new URL('https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com'));
   const {payload}=await jwtVerify(token,jwks,{issuer:`https://securetoken.google.com/${env.FIREBASE_PROJECT_ID}`,audience:env.FIREBASE_PROJECT_ID});
-  if(!payload.sub||typeof payload.email!=='string') throw new Error('Invalid Firebase identity');
-  return {firebaseUid:payload.sub,email:payload.email,displayName:typeof payload.name==='string'?payload.name:undefined,photoUrl:typeof payload.picture==='string'?payload.picture:undefined};
+  if(!payload.sub) throw new Error('Invalid Firebase identity');
+  return {firebaseUid:payload.sub,email:typeof payload.email==='string'?payload.email:undefined,displayName:typeof payload.name==='string'?payload.name:undefined,photoUrl:typeof payload.picture==='string'?payload.picture:undefined};
 }
 
 app.use('/api/*',async(c,next)=>{
@@ -37,8 +37,12 @@ app.use('/api/*',async(c,next)=>{
   try {
     const identity=await authenticate(token,c.env); const timestamp=now(); const existing=await c.env.DB.prepare('SELECT * FROM users WHERE firebase_uid = ?').bind(identity.firebaseUid).first<Record<string,string>>();
     const id=existing?.id ?? uuid('usr');
-    if(!existing) await c.env.DB.prepare('INSERT INTO users (id,firebase_uid,email,display_name,photo_url,created_at,updated_at) VALUES (?,?,?,?,?,?,?)').bind(id,identity.firebaseUid,identity.email,identity.displayName??null,identity.photoUrl??null,timestamp,timestamp).run();
-    c.set('user',{id,firebaseUid:identity.firebaseUid,email:identity.email,...(identity.displayName?{displayName:identity.displayName}:{}),...(identity.photoUrl?{photoUrl:identity.photoUrl}:{})}); await next();
+    const email=identity.email??existing?.email??`${identity.firebaseUid}@users.trigg.invalid`;
+    const displayName=identity.displayName??existing?.display_name;
+    const photoUrl=identity.photoUrl??existing?.photo_url;
+    if(existing) await c.env.DB.prepare('UPDATE users SET email=?,display_name=?,photo_url=?,updated_at=? WHERE id=?').bind(email,displayName??null,photoUrl??null,timestamp,id).run();
+    else await c.env.DB.prepare('INSERT INTO users (id,firebase_uid,email,display_name,photo_url,created_at,updated_at) VALUES (?,?,?,?,?,?,?)').bind(id,identity.firebaseUid,email,displayName??null,photoUrl??null,timestamp,timestamp).run();
+    c.set('user',{id,firebaseUid:identity.firebaseUid,email,...(displayName?{displayName}:{}),...(photoUrl?{photoUrl}:{})}); await next();
   } catch(error){return fail('UNAUTHORIZED',error instanceof Error?error.message:'Invalid token',401);}
 });
 
