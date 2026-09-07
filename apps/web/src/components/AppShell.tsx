@@ -1,8 +1,27 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import type { User } from 'firebase/auth';
 import { useQuery } from '@tanstack/react-query';
-import { Activity, Blocks, ChevronDown, Github, LayoutDashboard, LogOut, Settings as SettingsIcon, Zap } from 'lucide-react';
+import { Activity, Blocks, ChevronDown, Github, LayoutDashboard, LogOut, Menu, Settings as SettingsIcon, X, Zap } from 'lucide-react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { api, logout } from '../lib/api';
 type Me={email:string;displayName?:string};
-export function AppShell({user,children}:{user:User;children:ReactNode}){const navigate=useNavigate();const {data:me}=useQuery({queryKey:['me'],queryFn:()=>api<Me>('/api/me'),retry:false});const provider=user.providerData.find((entry)=>entry.providerId==='github.com');const name=me?.displayName??user.displayName??provider?.displayName??user.email?.split('@')[0]??'Developer';const email=user.email??provider?.email??me?.email??'';const initial=name.charAt(0).toUpperCase()||'T';const items=[['/dashboard','Overview',LayoutDashboard],['/workflows','Workflows',Blocks],['/executions','Executions',Activity],['/integrations','Integrations',Zap],['/settings','Settings',SettingsIcon]] as const;return <div className="app-shell"><aside className="sidebar"><a className="brand" href="/dashboard"><span className="logo-mark">T</span>Trigg <span className="beta">BETA</span></a><nav>{items.map(([to,label,Icon])=><NavLink key={to} to={to} className={({isActive})=>isActive?'active':''}><Icon size={17}/>{label}</NavLink>)}</nav><div className="sidebar-bottom"><div className="github-chip"><Github size={15}/><span>GitHub App</span><span className="status-dot"/></div><button className="profile" onClick={()=>void logout().then(()=>navigate('/'))}><span className="avatar">{initial}</span><span><b>{name}</b><small>{email}</small></span><LogOut size={15}/><ChevronDown size={14}/></button></div></aside><main className="app-main">{children}</main></div>}
+export function AppShell({user,children}:{user:User;children:ReactNode}){
+  const navigate=useNavigate();
+  const [sidebarOpen,setSidebarOpen]=useState(false);
+  const {data:me}=useQuery({queryKey:['me'],queryFn:()=>api<Me>('/api/me'),retry:false});
+  const provider=user.providerData.find((entry)=>entry.providerId==='github.com');
+  const name=me?.displayName??user.displayName??provider?.displayName??user.email?.split('@')[0]??'Developer';
+  const email=user.email??provider?.email??me?.email??'';
+  const initial=name.charAt(0).toUpperCase()||'T';
+  const items=[['/dashboard','Overview',LayoutDashboard],['/workflows','Workflows',Blocks],['/executions','Executions',Activity],['/integrations','Integrations',Zap],['/settings','Settings',SettingsIcon]] as const;
+  return <div className="app-shell">
+    <button className={`sidebar-backdrop ${sidebarOpen?'visible':''}`} aria-label="Close navigation" onClick={()=>setSidebarOpen(false)}/>
+    <aside className={`sidebar ${sidebarOpen?'open':''}`}>
+      <a className="brand" href="/dashboard"><span className="logo-mark">T</span><span className="brand-name">Trigg</span><span className="beta">BETA</span></a>
+      <button className="sidebar-toggle" type="button" aria-label={sidebarOpen?'Close navigation':'Open navigation'} aria-expanded={sidebarOpen} onClick={()=>setSidebarOpen((open)=>!open)}>{sidebarOpen?<X size={18}/>:<Menu size={18}/>}</button>
+      <nav>{items.map(([to,label,Icon])=><NavLink key={to} to={to} onClick={()=>setSidebarOpen(false)} className={({isActive})=>isActive?'active':''}><Icon size={17}/><span>{label}</span></NavLink>)}</nav>
+      <div className="sidebar-bottom"><div className="github-chip"><Github size={15}/><span>GitHub App</span><span className="status-dot"/></div><button className="profile" onClick={()=>void logout().then(()=>navigate('/'))}><span className="avatar">{initial}</span><span><b>{name}</b><small>{email}</small></span><LogOut size={15}/><ChevronDown size={14}/></button></div>
+    </aside>
+    <main className="app-main">{children}</main>
+  </div>;
+}
