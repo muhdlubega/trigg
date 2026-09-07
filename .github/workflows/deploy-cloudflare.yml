@@ -40,7 +40,7 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: apps/worker
-          command: deploy --config ../../wrangler.jsonc
+          command: deploy --keep-vars --config ../../wrangler.jsonc
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
