@@ -23,7 +23,7 @@ export function Landing(){
           <span className="hero-badge"><span/>AI CODE REVIEW FOR GITHUB</span>
           <h1>Review every pull request <em>where it happens.</em></h1>
           <p>Trigg reviews pull request diffs, posts structured findings on GitHub, and records the complete execution so your team can inspect every result.</p>
-          <div className="hero-actions"><a className="button primary" href="/login">Connect a repository <ArrowRight size={16}/></a><a className="button ghost" href={import.meta.env.VITE_GITHUB_URL??'#'}><Github size={16}/>View source</a></div>
+          <div className="hero-actions"><a className="button primary" href="/login">Connect a repository <ArrowRight size={16}/></a><a className="button ghost" href="https://github.com/muhdlubega/trigg" target="_blank" rel="noreferrer"><Github size={16}/>View source</a></div>
           <div className="hero-proof"><span><i/>GitHub App</span><span><i/>Provider fallback</span><span><i/>Open source</span></div>
         </div>
         <FlowDemo/>
