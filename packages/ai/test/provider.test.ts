@@ -11,4 +11,11 @@ describe('AI fallback',()=>{
     await expect(provider.generate({prompt:'review'})).resolves.toMatchObject({provider:'gemini'});
     await expect(provider.generateStructured({prompt:'review'},z.object({value:z.string()}))).resolves.toMatchObject({data:{value:'real'},usage:{provider:'gemini'}});
   });
+  it('reports both provider errors when the fallback also fails',async()=>{
+    const primary:AIProvider={generate:async()=>{throw new Error('Mistral request failed (401)');},generateStructured:async()=>{throw new Error('Mistral request failed (401)');}};
+    const fallback:AIProvider={generate:async()=>{throw new Error('Gemini request failed (404)');},generateStructured:async()=>{throw new Error('Gemini request failed (404)');}};
+    const provider=new FallbackAIProvider(primary,fallback);
+    await expect(provider.generate({prompt:'review'})).rejects.toThrow(/Mistral request failed \(401\).+Gemini request failed \(404\)/);
+    await expect(provider.generateStructured({prompt:'review'},z.object({value:z.string()}))).rejects.toThrow(/Mistral request failed \(401\).+Gemini request failed \(404\)/);
+  });
 });
