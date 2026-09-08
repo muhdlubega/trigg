@@ -81,7 +81,7 @@ export abstract class BaseProvider implements AIProvider {
       } else lastError = extracted.error;
       correction = `\n\nYour previous reply was rejected because ${lastError}. Reply with only the corrected JSON object.`;
     }
-    throw new Error(`${this.name} returned invalid structured output — ${lastError}`);
+    throw new Error(`${this.name} returned invalid structured output: ${lastError}`);
   }
 }
 
@@ -170,7 +170,7 @@ export class FallbackAIProvider implements AIProvider {
     try { return await primary(); } catch (error) { primaryError = error; }
     try { return await fallback(); }
     catch (error) {
-      throw new Error(`Both AI providers failed. ${this.primary.name ?? 'Primary'} — ${message(primaryError)}. ${this.fallback.name ?? 'Fallback'} — ${message(error)}.`);
+      throw new Error(`Both AI providers failed. ${this.primary.name ?? 'Primary'}: ${message(primaryError)}. ${this.fallback.name ?? 'Fallback'}: ${message(error)}.`);
     }
   }
   generate(request: AIRequest) { return this.attempt(() => this.primary.generate(request), () => this.fallback.generate(request)); }

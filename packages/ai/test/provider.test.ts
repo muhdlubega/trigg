@@ -23,7 +23,7 @@ describe('AI fallback',()=>{
   });
   it('reports both provider errors in a readable sentence',async()=>{
     const provider=new FallbackAIProvider(failing('Mistral','Mistral request failed (429): Rate limit exceeded'),failing('Gemini','Gemini returned invalid structured output'));
-    await expect(provider.generate({prompt:'review'})).rejects.toThrow('Both AI providers failed. Mistral — Mistral request failed (429): Rate limit exceeded. Gemini — Gemini returned invalid structured output.');
+    await expect(provider.generate({prompt:'review'})).rejects.toThrow('Both AI providers failed. Mistral: Mistral request failed (429): Rate limit exceeded. Gemini: Gemini returned invalid structured output.');
   });
 });
 
@@ -41,7 +41,7 @@ describe('structured output',()=>{
   });
   it('reports unusable output in a readable sentence',async()=>{
     const provider=new StubProvider(['{"summary":"ok"}','{"summary":"ok"}','{"summary":"ok"}']);
-    await expect(provider.generateStructured({prompt:'review'},CodeReviewSchema)).rejects.toThrow(/^Stub returned invalid structured output — riskScore: /);
+    await expect(provider.generateStructured({prompt:'review'},CodeReviewSchema)).rejects.toThrow(/^Stub returned invalid structured output: riskScore: /);
   });
 });
 

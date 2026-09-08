@@ -178,7 +178,7 @@ const SEVERITY_ICON:Record<string,string>={low:'🟢',medium:'🟡',high:'🟠',
 const RECOMMENDATION_ICON:Record<string,string>={approve:'✅',comment:'💬',request_changes:'⚠️'};
 function reviewComment(review:CodeReview,format:'concise'|'detailed',commentMode:'always'|'issues_only'){
   if(commentMode==='issues_only'&&!review.findings.length)return '';
-  const location=(finding:CodeReview['findings'][number])=>finding.file?` — \`${finding.file}${finding.line?`:${finding.line}`:''}\``:'';
+  const location=(finding:CodeReview['findings'][number])=>finding.file?` in \`${finding.file}${finding.line?`:${finding.line}`:''}\``:'';
   const findings=review.findings.length
     ?review.findings.map((finding,index)=>`${index+1}. ${SEVERITY_ICON[finding.severity]??'⚪'} **${finding.severity.toUpperCase()}: ${finding.title}**${location(finding)}${format==='concise'?'':`\n   ${finding.description}`}`).join('\n')
     :'✅ No material issues found.';
