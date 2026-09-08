@@ -1,4 +1,5 @@
 import { Activity, ArrowRight, Bot, CheckCircle2, Cloud, Database, Github, GitPullRequest, LockKeyhole, Play, RefreshCw, ShieldCheck, Webhook } from 'lucide-react';
+import { SiteChrome } from '../components/SiteChrome';
 
 const reviewSteps=[
   {Icon:Webhook,n:'01',title:'Connect',copy:'Install the Trigg GitHub App and choose the repositories you want reviewed.'},
@@ -15,12 +16,7 @@ const architecture=[
 ];
 
 export function Landing(){
-  return <div className="landing">
-    <nav className="landing-nav">
-      <a className="brand" href="/"><span className="logo-mark">T</span>Trigg</a>
-      <div><a href="#product">How it works</a><a href="#pull-request">PR reviews</a><a href="#architecture">Architecture</a><a href="/docs">Docs</a></div>
-      <a className="button small" href="/login">Open app <ArrowRight size={14}/></a>
-    </nav>
+  return <SiteChrome>
     <main>
       <section className="hero">
         <div className="hero-copy">
@@ -56,8 +52,7 @@ export function Landing(){
 
       <section className="cta"><span className="logo-mark">T</span><h2>Review your next pull request with Trigg.</h2><p>Connect GitHub, choose a repository, and keep the full review lifecycle visible.</p><a className="button primary" href="/login">Open Trigg <ArrowRight size={16}/></a></section>
     </main>
-    <footer className="landing-footer"><a className="brand" href="/"><span className="logo-mark">T</span>Trigg</a><span>AI code review, directly on your pull requests.</span><div><a href="/docs">Docs</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></div></footer>
-  </div>;
+  </SiteChrome>;
 }
 
 function FlowDemo(){
