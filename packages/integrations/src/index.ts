@@ -34,6 +34,15 @@ export async function createGitHubAppJwt(appId:string, privateKeyPem:string):Pro
   return `${header}.${payload}.${base64Url(signature)}`;
 }
 
+export async function getGitHubAppSlug(appId:string,privateKeyPem:string):Promise<string> {
+  const jwt=await createGitHubAppJwt(appId,privateKeyPem);
+  const response=await fetch('https://api.github.com/app',{headers:{authorization:`Bearer ${jwt}`,accept:'application/vnd.github+json','user-agent':'trigg/0.1','x-github-api-version':'2022-11-28'}});
+  if(!response.ok)throw new Error(await githubErrorMessage(response,'GitHub App lookup failed'));
+  const app=await response.json() as {slug?:unknown};
+  if(typeof app.slug!=='string'||!app.slug.trim())throw new Error('GitHub App lookup did not return an app slug');
+  return app.slug;
+}
+
 export type GitHubInstallationPermissions=Record<string,string>;
 export const REQUIRED_GITHUB_PERMISSIONS=[
   {key:'metadata',level:'read',label:'Metadata: read'},

@@ -3,14 +3,14 @@ import { cors } from 'hono/cors';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { z } from 'zod';
 import { CodeReviewSchema, FallbackAIProvider, GeminiProvider, MistralProvider, type AIProvider, type CodeReview } from '@trigg/ai';
-import { GitHubAppClient, ResendEmailProvider, assertSafeHttpUrl, missingGitHubPermissions, normalizePullRequestEvent, verifyGitHubSignature, type GitHubCheckConclusion, type GitHubCheckRun, type GitHubPullRequestContext } from '@trigg/integrations';
+import { GitHubAppClient, ResendEmailProvider, assertSafeHttpUrl, getGitHubAppSlug, missingGitHubPermissions, normalizePullRequestEvent, verifyGitHubSignature, type GitHubCheckConclusion, type GitHubCheckRun, type GitHubPullRequestContext } from '@trigg/integrations';
 import { WORKFLOW_TEMPLATES, workflowDefinitionSchema, type ApiError, type ApiResponse, type WorkflowDefinition, type WorkflowNode } from '@trigg/shared';
 import { executeWorkflow, type ExecutionContext, type NodeExecutor } from '@trigg/workflow-engine';
 
 type Variables = { user: { id:string; firebaseUid:string; email:string; displayName?:string; photoUrl?:string } };
 type Bindings = Env & {
   FIREBASE_PROJECT_ID?:string; GITHUB_APP_ID?:string; GITHUB_PRIVATE_KEY?:string; GITHUB_WEBHOOK_SECRET?:string;
-  GITHUB_APP_SLUG?:string; RESEND_API_KEY?:string; GEMINI_API_KEY?:string; MISTRAL_API_KEY?:string; MISTRAL_MODEL?:string; GEMINI_MODEL?:string;
+  RESEND_API_KEY?:string; GEMINI_API_KEY?:string; MISTRAL_API_KEY?:string; MISTRAL_MODEL?:string; GEMINI_MODEL?:string;
 };
 type QueueMessage = {kind:'github-event';eventId:string}|{kind:'workflow-run';workflowId:string;userId:string;input:ExecutionContext;mode:'LIVE';executionId?:string};
 type GitHubRepository = {id:number;full_name:string;private:boolean;default_branch:string;updated_at:string;owner:{login:string}};
@@ -136,10 +136,10 @@ app.get('/api/integrations/github',async(c)=>{
       return {...installation,missingPermissions:missingGitHubPermissions(await client.installationPermissions())};
     } catch { return {...installation,missingPermissions:[] as string[]}; }
   }));
-  return c.json(ok({configured:Boolean(c.env.GITHUB_APP_ID),appSlug:c.env.GITHUB_APP_SLUG??null,installations}));
+  return c.json(ok({configured:Boolean(c.env.GITHUB_APP_ID&&c.env.GITHUB_PRIVATE_KEY),appSlug:null,installations}));
 });
 app.get('/api/github/repositories',async(c)=>{const user=c.get('user');const installations=await c.env.DB.prepare('SELECT id,installation_id FROM github_installations WHERE user_id=?').bind(user.id).all<{id:string;installation_id:string}>();for(const installation of installations.results){try{await syncGitHubRepositories(c.env,user.id,installation.id,installation.installation_id);}catch{/* Return cached repositories if GitHub is temporarily unavailable. */}}const result=await c.env.DB.prepare('SELECT * FROM repositories WHERE user_id=? ORDER BY updated_at DESC,full_name ASC').bind(user.id).all();return c.json(ok(result.results));});
-app.post('/api/integrations/github/connect',async(c)=>{if(!c.env.GITHUB_APP_SLUG)return fail('NOT_CONFIGURED','GitHub App slug is not configured');const state=crypto.randomUUID();const timestamp=now();await c.env.DB.prepare("DELETE FROM integration_connections WHERE user_id=? AND provider='github_pending'").bind(c.get('user').id).run();await c.env.DB.prepare('INSERT INTO integration_connections (id,user_id,provider,status,config_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?)').bind(uuid('conn'),c.get('user').id,'github_pending','pending',JSON.stringify({state,expiresAt:Date.now()+15*60*1000}),timestamp,timestamp).run();return c.json(ok({url:`https://github.com/apps/${c.env.GITHUB_APP_SLUG}/installations/new?state=${encodeURIComponent(state)}`}));});
+app.post('/api/integrations/github/connect',async(c)=>{if(!c.env.GITHUB_APP_ID||!c.env.GITHUB_PRIVATE_KEY)return fail('NOT_CONFIGURED','GitHub App credentials are not configured');let appSlug:string;try{appSlug=await getGitHubAppSlug(c.env.GITHUB_APP_ID,c.env.GITHUB_PRIVATE_KEY);}catch(error){return fail('GITHUB_APP_INVALID',error instanceof Error?error.message:'GitHub App credentials could not be verified',500);}const state=crypto.randomUUID();const timestamp=now();await c.env.DB.prepare("DELETE FROM integration_connections WHERE user_id=? AND provider='github_pending'").bind(c.get('user').id).run();await c.env.DB.prepare('INSERT INTO integration_connections (id,user_id,provider,status,config_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?)').bind(uuid('conn'),c.get('user').id,'github_pending','pending',JSON.stringify({state,expiresAt:Date.now()+15*60*1000}),timestamp,timestamp).run();return c.json(ok({url:`https://github.com/apps/${encodeURIComponent(appSlug)}/installations/new?state=${encodeURIComponent(state)}`}));});
 app.post('/api/integrations/github/callback',async(c)=>{
   const {installationId,state}=z.object({installationId:z.coerce.string().min(1),state:z.string().min(1)}).parse(await c.req.json());
   const pending=await c.env.DB.prepare("SELECT id,config_json FROM integration_connections WHERE user_id=? AND provider='github_pending' AND status='pending' ORDER BY created_at DESC LIMIT 1").bind(c.get('user').id).first<{id:string;config_json:string}>();const pendingConfig=parseJson<{state:string;expiresAt:number}>(pending?.config_json??null,{state:'',expiresAt:0});

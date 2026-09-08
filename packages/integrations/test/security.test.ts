@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { assertSafeHttpUrl, githubErrorMessage, missingGitHubPermissions, normalizePullRequestEvent, verifyGitHubSignature } from '../src';
+import { describe, expect, it, vi } from 'vitest';
+import { assertSafeHttpUrl, getGitHubAppSlug, githubErrorMessage, missingGitHubPermissions, normalizePullRequestEvent, verifyGitHubSignature } from '../src';
 
 describe('integration security', () => {
   it('accepts a valid GitHub HMAC and rejects tampering', async () => {
@@ -37,5 +37,17 @@ describe('integration security', () => {
     expect(missingGitHubPermissions({metadata:'read',contents:'read',pull_requests:'write',checks:'write'})).toEqual([]);
     expect(missingGitHubPermissions({metadata:'read',contents:'read',pull_requests:'read'})).toEqual(['Pull requests: write','Checks: write']);
     expect(missingGitHubPermissions({metadata:'read',contents:'read',pull_requests:'admin',checks:'write'})).toEqual([]);
+  });
+
+  it('uses the authenticated GitHub App slug instead of a configured guess', async () => {
+    const keys=await crypto.subtle.generateKey({name:'RSASSA-PKCS1-v1_5',modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:'SHA-256'},true,['sign','verify']);
+    const bytes=new Uint8Array(await crypto.subtle.exportKey('pkcs8',keys.privateKey));
+    const pem=`-----BEGIN PRIVATE KEY-----\n${btoa(String.fromCharCode(...bytes))}\n-----END PRIVATE KEY-----`;
+    const fetchMock=vi.fn().mockResolvedValue(Response.json({slug:'verified-trigg-app'}));
+    vi.stubGlobal('fetch',fetchMock);
+    try {
+      await expect(getGitHubAppSlug('12345',pem)).resolves.toBe('verified-trigg-app');
+      expect(fetchMock).toHaveBeenCalledWith('https://api.github.com/app',expect.objectContaining({headers:expect.objectContaining({authorization:expect.stringMatching(/^Bearer /)})}));
+    } finally { vi.unstubAllGlobals(); }
   });
 });
