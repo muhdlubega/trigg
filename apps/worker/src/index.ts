@@ -174,7 +174,16 @@ app.all('/hooks/:webhookId',async(c)=>{
 });
 
 function aiProvider(env:Bindings):AIProvider{const mistral=env.MISTRAL_API_KEY?.trim()?new MistralProvider(env.MISTRAL_API_KEY,env.MISTRAL_MODEL):null;const gemini=env.GEMINI_API_KEY?.trim()?new GeminiProvider(env.GEMINI_API_KEY,env.GEMINI_MODEL):null;if(mistral&&gemini)return new FallbackAIProvider(mistral,gemini);const provider=mistral??gemini;if(!provider)throw new Error('A Mistral or Gemini API key is required');return provider;}
-function reviewComment(review:CodeReview,format:'concise'|'detailed',commentMode:'always'|'issues_only'){if(commentMode==='issues_only'&&!review.findings.length)return '';const findings=review.findings.length?review.findings.map((finding,index)=>format==='concise'?`${index+1}. **${finding.severity.toUpperCase()}: ${finding.title}**${finding.file?` — \`${finding.file}${finding.line?`:${finding.line}`:''}\``:''}`:`${index+1}. **${finding.severity.toUpperCase()}: ${finding.title}**${finding.file?` — \`${finding.file}${finding.line?`:${finding.line}`:''}\``:''}\n   ${finding.description}`).join('\n'):'No material issues found.';return `## Trigg code review\n\n${review.summary}\n\n**Risk:** ${review.riskScore}/100 (${review.severity})  \n**Recommendation:** ${review.recommendation.replace('_',' ')}\n\n### Findings\n${findings}\n\n<sub>Reviewed by Trigg using Mistral with Gemini fallback.</sub>`;}
+const SEVERITY_ICON:Record<string,string>={low:'🟢',medium:'🟡',high:'🟠',critical:'🔴'};
+const RECOMMENDATION_ICON:Record<string,string>={approve:'✅',comment:'💬',request_changes:'⚠️'};
+function reviewComment(review:CodeReview,format:'concise'|'detailed',commentMode:'always'|'issues_only'){
+  if(commentMode==='issues_only'&&!review.findings.length)return '';
+  const location=(finding:CodeReview['findings'][number])=>finding.file?` — \`${finding.file}${finding.line?`:${finding.line}`:''}\``:'';
+  const findings=review.findings.length
+    ?review.findings.map((finding,index)=>`${index+1}. ${SEVERITY_ICON[finding.severity]??'⚪'} **${finding.severity.toUpperCase()}: ${finding.title}**${location(finding)}${format==='concise'?'':`\n   ${finding.description}`}`).join('\n')
+    :'✅ No material issues found.';
+  return `## 🔍 Trigg code review\n\n${review.summary}\n\n**Risk:** ${SEVERITY_ICON[review.severity]??'⚪'} ${review.riskScore}/100 (${review.severity})  \n**Recommendation:** ${RECOMMENDATION_ICON[review.recommendation]??'💬'} ${review.recommendation.replace('_',' ')}\n\n### Findings\n${findings}\n\n<sub>Reviewed by Trigg using Mistral with Gemini fallback.</sub>`;
+}
 function executors(env:Bindings,executionId:string,installationId?:string):Record<string,NodeExecutor>{
   const ai=aiProvider(env);
   const github=installationId&&env.GITHUB_APP_ID&&env.GITHUB_PRIVATE_KEY?new GitHubAppClient(env.GITHUB_APP_ID,env.GITHUB_PRIVATE_KEY,installationId):null;

@@ -3,17 +3,19 @@ import { Activity, ArrowUpRight, Blocks, Bot, CheckCircle2, Github, Play, Plus, 
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import { pollIfAnyActive } from '../lib/runs';
-import { PageHeader, RefreshButton, Skeleton, Status } from '../components/UI';
+import { AutoRefreshToast, PageHeader, RefreshButton, Skeleton, Status, useRefresh } from '../components/UI';
 type Data={activeWorkflows:number;executionsToday:number;successRate:number;aiRuns:number;aiTokens:number;recent:Array<Record<string,string|number>>;active:Array<{id:string;name:string;repository:string;repositoryId?:string}>};
 export function Dashboard(){
   const client=useQueryClient();
   const navigate=useNavigate();
   const {data,isLoading,isFetching,error,refetch}=useQuery({queryKey:['dashboard'],queryFn:()=>api<Data>('/api/dashboard'),refetchInterval:(result)=>pollIfAnyActive(result.state.data?.recent)});
+  const {refresh,isManual,isAuto}=useRefresh(refetch,isFetching,isLoading);
   const run=useMutation({mutationFn:(id:string)=>api<{executionId:string;pullRequest:number}>(`/api/workflows/${id}/run`,{method:'POST'}),onSuccess:(result)=>{void client.invalidateQueries({queryKey:['dashboard']});void client.invalidateQueries({queryKey:['executions']});void navigate(`/executions/${result.executionId}`);}});
   const hour=new Date().getHours();
   const metrics=[{Icon:Blocks,label:'Active workflows',value:data?.activeWorkflows??0,note:'Repository reviewers enabled'},{Icon:Activity,label:'Executions today',value:data?.executionsToday??0,note:'Webhook and manual runs'},{Icon:CheckCircle2,label:'Success rate today',value:`${data?.successRate??0}%`,note:'Completed executions'},{Icon:Bot,label:'AI runs today',value:data?.aiRuns??0,note:`${(data?.aiTokens??0).toLocaleString()} tokens`}];
   return <div className="page">
-    <PageHeader eyebrow="OVERVIEW" title={`${hour<12?'Good morning':hour<18?'Good afternoon':'Good evening'} 👋`} description="Trigger a review now or let Trigg review new pull requests automatically." action={<><RefreshButton isRefreshing={isFetching} onRefresh={()=>void refetch()}/><Link to="/workflows" className="button primary"><Plus size={15}/>New reviewer</Link></>}/>
+    <PageHeader eyebrow="OVERVIEW" title={`${hour<12?'Good morning':hour<18?'Good afternoon':'Good evening'} 👋`} description="Trigger a review now or let Trigg review new pull requests automatically." action={<><RefreshButton isRefreshing={isManual} onRefresh={refresh}/><Link to="/workflows" className="button primary"><Plus size={15}/>New reviewer</Link></>}/>
+    <AutoRefreshToast active={isAuto}/>
     <div className="metric-grid">{metrics.map(({Icon,label,value,note})=><article className="metric" key={label}><div><Icon size={17}/></div><small>{label}</small><strong>{value}</strong><p>{note}</p></article>)}</div>
     <div className="dashboard-grid">
       <section className="panel"><header><div><h2>Repository workflows</h2><p>Run a review on the most recently updated open pull request.</p></div><Link to="/workflows">Manage <ArrowUpRight size={14}/></Link></header>
