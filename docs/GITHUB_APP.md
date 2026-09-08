@@ -13,8 +13,8 @@ Repository permissions:
 - Metadata: read
 - Contents: read
 - Pull requests: read and write
-- Issues: read and write
-- Checks: read only if a workflow needs check data
+- Checks: write
+- Issues: optional; reviews are posted through the pull request review API
 
 Subscribe to `pull_request`, `issues`, `issue_comment`, `push`, `installation`, and `installation_repositories`.
 

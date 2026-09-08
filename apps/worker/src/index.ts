@@ -3,7 +3,7 @@ import { cors } from 'hono/cors';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { z } from 'zod';
 import { CodeReviewSchema, FallbackAIProvider, GeminiProvider, MistralProvider, type AIProvider, type CodeReview } from '@trigg/ai';
-import { GitHubAppClient, ResendEmailProvider, assertSafeHttpUrl, normalizePullRequestEvent, verifyGitHubSignature } from '@trigg/integrations';
+import { GitHubAppClient, ResendEmailProvider, assertSafeHttpUrl, normalizePullRequestEvent, verifyGitHubSignature, type GitHubCheckConclusion, type GitHubCheckRun, type GitHubPullRequestContext } from '@trigg/integrations';
 import { WORKFLOW_TEMPLATES, workflowDefinitionSchema, type ApiError, type ApiResponse, type WorkflowDefinition, type WorkflowNode } from '@trigg/shared';
 import { executeWorkflow, type ExecutionContext, type NodeExecutor } from '@trigg/workflow-engine';
 
@@ -12,7 +12,7 @@ type Bindings = Env & {
   FIREBASE_PROJECT_ID?:string; GITHUB_APP_ID?:string; GITHUB_PRIVATE_KEY?:string; GITHUB_WEBHOOK_SECRET?:string;
   GITHUB_APP_SLUG?:string; RESEND_API_KEY?:string; GEMINI_API_KEY?:string; MISTRAL_API_KEY?:string; MISTRAL_MODEL?:string; GEMINI_MODEL?:string;
 };
-type QueueMessage = {kind:'github-event';eventId:string}|{kind:'workflow-run';workflowId:string;userId:string;input:ExecutionContext;mode:'LIVE'};
+type QueueMessage = {kind:'github-event';eventId:string}|{kind:'workflow-run';workflowId:string;userId:string;input:ExecutionContext;mode:'LIVE';executionId?:string};
 type GitHubRepository = {id:number;full_name:string;private:boolean;default_branch:string;updated_at:string;owner:{login:string}};
 const reviewerSettingsSchema=z.object({enabled:z.boolean(),branches:z.array(z.string().trim().min(1).max(255)).min(1).max(20),responseFormat:z.enum(['concise','detailed']),focus:z.enum(['balanced','correctness','security']),commentMode:z.enum(['always','issues_only'])});
 type ReviewerSettings=z.infer<typeof reviewerSettingsSchema>;
@@ -74,7 +74,7 @@ app.get('/api/dashboard',async(c)=>{
     c.env.DB.prepare("SELECT COUNT(*) total, SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) successful FROM workflow_executions WHERE user_id=? AND date(started_at)=date('now')").bind(user.id).first<{total:number;successful:number}>(),
     c.env.DB.prepare("SELECT COUNT(*) requests, COALESCE(SUM(input_tokens+output_tokens),0) tokens FROM ai_usage a JOIN workflow_executions e ON e.id=a.execution_id WHERE e.user_id=? AND date(a.created_at)=date('now')").bind(user.id).first<{requests:number;tokens:number}>(),
     c.env.DB.prepare('SELECT e.*,w.name workflow_name FROM workflow_executions e JOIN workflows w ON w.id=e.workflow_id WHERE e.user_id=? ORDER BY e.started_at DESC LIMIT 5').bind(user.id).all(),
-    c.env.DB.prepare('SELECT w.id,w.name,r.full_name repository FROM workflows w JOIN repositories r ON r.id=w.repository_id WHERE w.user_id=? AND w.enabled=1 ORDER BY w.updated_at DESC').bind(user.id).all(),
+    c.env.DB.prepare('SELECT w.id,w.name,r.id repositoryId,r.full_name repository FROM workflows w JOIN repositories r ON r.id=w.repository_id WHERE w.user_id=? AND w.enabled=1 ORDER BY w.updated_at DESC').bind(user.id).all(),
   ]);
   const total=executions?.total??0; return c.json(ok({activeWorkflows:workflows?.total??0,executionsToday:total,successRate:total?Math.round(((executions?.successful??0)/total)*100):0,aiRuns:ai?.requests??0,aiTokens:ai?.tokens??0,recent:recent.results,active:active.results}));
 });
@@ -114,11 +114,14 @@ app.post('/api/workflows/:id/run',async(c)=>{
   const user=c.get('user');const row=await ownedWorkflow(c.env,user.id,c.req.param('id'));if(!row)return fail('NOT_FOUND','Workflow not found',404);
   if(!row.repository||!row.github_installation_id)return fail('REPOSITORY_REQUIRED','Connect a GitHub repository to run this workflow');
   if(!c.env.GITHUB_APP_ID||!c.env.GITHUB_PRIVATE_KEY)return fail('NOT_CONFIGURED','GitHub App credentials are not configured',500);
+  const daily=await c.env.DB.prepare("SELECT COUNT(*) total FROM workflow_executions WHERE user_id=? AND date(started_at)=date('now')").bind(user.id).first<{total:number}>(); if((daily?.total??0)>=Number(c.env.FREE_DAILY_RUN_LIMIT))return fail('RATE_LIMITED','Daily workflow run limit reached',429);
   const client=new GitHubAppClient(c.env.GITHUB_APP_ID,c.env.GITHUB_PRIVATE_KEY,String(row.github_installation_id));const pulls=await client.listOpenPullRequests(String(row.repository));const pull=pulls[0];
   if(!pull)return fail('NO_OPEN_PULL_REQUESTS','This repository has no open pull requests',404);
-  const github={repository:String(row.repository),repositoryId:String(row.repository_id),prNumber:pull.number,title:pull.title,body:pull.body??'',author:pull.user.login,action:'manual',baseBranch:pull.base.ref,headBranch:pull.head.ref,url:pull.html_url};
-  await c.env.WORKFLOW_QUEUE.send({kind:'workflow-run',workflowId:c.req.param('id'),userId:user.id,input:{github,installationId:String(row.github_installation_id)},mode:'LIVE'} satisfies QueueMessage);
-  return c.json(ok({queued:true,pullRequest:pull.number}),202);
+  const github:GitHubPullRequestContext={repository:String(row.repository),repositoryId:String(row.repository_id),prNumber:pull.number,title:pull.title,body:pull.body??'',author:pull.user.login,action:'manual',baseBranch:pull.base.ref,headBranch:pull.head.ref,headSha:pull.head.sha,url:pull.html_url};
+  const executionId=uuid('exec');
+  await c.env.DB.prepare('INSERT INTO workflow_executions (id,workflow_id,workflow_version,user_id,status,mode,trigger_json,started_at) VALUES (?,?,?,?,?,?,?,?)').bind(executionId,String(row.id),Number(row.current_version),user.id,'queued', 'LIVE',JSON.stringify({github,installationId:String(row.github_installation_id)}),now()).run();
+  await c.env.WORKFLOW_QUEUE.send({kind:'workflow-run',workflowId:c.req.param('id'),userId:user.id,input:{github,installationId:String(row.github_installation_id)},mode:'LIVE',executionId} satisfies QueueMessage);
+  return c.json(ok({queued:true,executionId,pullRequest:pull.number}),202);
 });
 
 app.get('/api/executions',async(c)=>{const result=await c.env.DB.prepare('SELECT e.*,w.name workflow_name FROM workflow_executions e JOIN workflows w ON w.id=e.workflow_id WHERE e.user_id=? ORDER BY e.started_at DESC LIMIT 100').bind(c.get('user').id).all();return c.json(ok(result.results));});
@@ -172,20 +175,79 @@ function executors(env:Bindings,executionId:string,installationId?:string):Recor
     'logic.transform':async(node)=>node.config.mapping,'logic.delay':async(node)=>({waitingSeconds:node.config.seconds}),
     'action.save':async(node)=>node.config.value,
     'action.email':async(node)=>{if(!env.RESEND_API_KEY)throw new Error('Resend is not configured');const provider=new ResendEmailProvider(env.RESEND_API_KEY,env.EMAIL_FROM);const result=await provider.send({to:String(node.config.to),subject:String(node.config.subject),body:String(node.config.body)});await env.DB.prepare('INSERT INTO email_logs (id,execution_id,recipient_masked,provider,status,created_at) VALUES (?,?,?,?,?,?)').bind(uuid('email'),executionId,String(node.config.to).replace(/^(.{2}).+(@.+)$/,'$1***$2'),result.provider,'sent',now()).run();return result;},
-    'action.githubComment':async(node)=>{if(!github)throw new Error('GitHub App installation is required');const body=String(node.config.body??'').trim();if(!body)return {skipped:true,reason:'No material findings'};return github.comment(String(node.config.repository),Number(node.config.issueNumber),body);},
+    'action.githubComment':async(node)=>{if(!github)throw new Error('GitHub App installation is required');const body=String(node.config.body??'').trim();if(!body)return {skipped:true,reason:'No material findings'};const posted=await github.createPullRequestReview(String(node.config.repository),Number(node.config.issueNumber),body);return {id:posted.id,html_url:posted.html_url};},
     'action.githubIssue':async(node)=>{if(!github)throw new Error('GitHub App installation is required');return github.createIssue(String(node.config.repository),String(node.config.title),String(node.config.body),node.config.labels as string[]|undefined);},
     'action.http':async(node)=>{const url=assertSafeHttpUrl(String(node.config.url));const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),Number(node.config.timeout??10000));const method=String(node.config.method);try{const response=await fetch(url,{method,...(node.config.headers?{headers:node.config.headers as Record<string,string>}:{}),...(['GET','HEAD'].includes(method)?{}:{body:String(node.config.body??'')}),signal:controller.signal,redirect:'error'});return {status:response.status,ok:response.ok,body:(await response.text()).slice(0,10000)};}finally{clearTimeout(timer);}},
   };
 }
 async function recordAI(env:Bindings,executionId:string,nodeId:string,usage:{provider:string;model:string;inputTokens:number;outputTokens:number;durationMs:number}){await env.DB.prepare('INSERT INTO ai_usage (id,execution_id,node_id,provider,model,input_tokens,output_tokens,duration_ms,estimated_cost,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)').bind(uuid('ai'),executionId,nodeId,usage.provider,usage.model,usage.inputTokens,usage.outputTokens,usage.durationMs,0,now()).run();}
 
+function pullRequestFromInput(input:ExecutionContext):GitHubPullRequestContext|undefined {
+  const github=input.github; if(!github||typeof github!=='object') return undefined; return github as GitHubPullRequestContext;
+}
+
+function reviewFromOutputs(outputs:ExecutionContext):Partial<CodeReview>&{comment?:string}|undefined {
+  const review=outputs.review; if(!review||typeof review!=='object') return undefined; return review as Partial<CodeReview>&{comment?:string};
+}
+
+function checkConclusion(result:{status:string;nodes:Array<{nodeId:string;status:string}>}):GitHubCheckConclusion {
+  const review=result.nodes.find((node)=>node.nodeId==='review');
+  if(!review||review.status==='failed') return 'failure';
+  if(review.status==='skipped') return 'neutral';
+  return 'success';
+}
+
+function checkOutput(result:{outputs:ExecutionContext;status:string;nodes:Array<{nodeId:string;status:string;error?:string}>}) {
+  const review=reviewFromOutputs(result.outputs);
+  const comment=result.nodes.find((node)=>node.nodeId==='comment');
+  const conclusion=checkConclusion(result);
+  const title=conclusion==='success'?'Trigg AI review complete':conclusion==='neutral'?'Trigg AI review skipped':'Trigg AI review failed';
+  const summary=review?.summary??(comment?.error??result.nodes.find((node)=>node.error)?.error??'Review finished.');
+  const text=review?.comment??(review?.findings?.length?review.findings.map((finding)=>`- ${finding.severity}: ${finding.title}`).join('\n'):undefined);
+  return {conclusion,title,summary,text};
+}
+
+async function startReviewCheck(github:GitHubAppClient|null,pr:GitHubPullRequestContext|undefined) {
+  if(!github||!pr?.repository||!pr.headSha) return null;
+  try { return await github.createCheckRun(pr.repository,{name:'Trigg AI review',headSha:pr.headSha,status:'in_progress',title:'Reviewing pull request',summary:'Trigg is reviewing this pull request.'}); }
+  catch(error){ console.error(JSON.stringify({event:'github.check.start_failed',error:error instanceof Error?error.message:'Unknown'})); return null; }
+}
+
+async function completeReviewCheck(github:GitHubAppClient|null,pr:GitHubPullRequestContext|undefined,check:GitHubCheckRun|null,result:{outputs:ExecutionContext;status:string;nodes:Array<{nodeId:string;status:string;error?:string}>}) {
+  if(!github||!pr?.repository||!check) return;
+  const output=checkOutput(result);
+  try { await github.updateCheckRun(pr.repository,check.id,{status:'completed',conclusion:output.conclusion,title:output.title,summary:output.summary,...(output.text?{text:output.text}:{})}); }
+  catch(error){ console.error(JSON.stringify({event:'github.check.complete_failed',error:error instanceof Error?error.message:'Unknown'})); }
+}
+
+async function failExecution(env:Bindings,executionId:string|undefined,started:number,error:unknown) {
+  if(!executionId) return;
+  const message=error instanceof Error?error.message:'Unknown error';
+  await env.DB.prepare('UPDATE workflow_executions SET status=?,error=?,completed_at=?,duration_ms=? WHERE id=? AND status IN (\'queued\',\'running\')').bind('failed',message,now(),Date.now()-started,executionId).run();
+}
+
 async function runWorkflow(env:Bindings,message:Extract<QueueMessage,{kind:'workflow-run'}>){
-  const row=await ownedWorkflow(env,message.userId,message.workflowId); if(!row)throw new Error('Workflow not found'); const workflow=parseJson<WorkflowDefinition>(String(row.definition_json),{} as WorkflowDefinition); const executionId=uuid('exec'); const started=Date.now();
-  const daily=await env.DB.prepare("SELECT COUNT(*) total FROM workflow_executions WHERE user_id=? AND date(started_at)=date('now')").bind(message.userId).first<{total:number}>(); if((daily?.total??0)>=Number(env.FREE_DAILY_RUN_LIMIT))throw new Error('Daily workflow run limit reached');
-  await env.DB.prepare('INSERT INTO workflow_executions (id,workflow_id,workflow_version,user_id,status,mode,trigger_json,started_at) VALUES (?,?,?,?,?,?,?,?)').bind(executionId,workflow.id,workflow.version,message.userId,'running',message.mode,JSON.stringify(message.input),now()).run();
-  const result=await executeWorkflow(workflow,message.input,executors(env,executionId,typeof message.input.installationId==='string'?message.input.installationId:undefined));
-  for(const node of result.nodes)await env.DB.prepare('INSERT INTO node_executions (id,execution_id,node_id,status,input_json,output_json,error,duration_ms,started_at) VALUES (?,?,?,?,?,?,?,?,?)').bind(uuid('nexec'),executionId,node.nodeId,node.status,JSON.stringify(node.input),node.output===undefined?null:JSON.stringify(node.output),node.error??null,node.durationMs,new Date(started).toISOString()).run();
-  await env.DB.prepare('UPDATE workflow_executions SET status=?,outputs_json=?,error=?,completed_at=?,duration_ms=? WHERE id=?').bind(result.status,JSON.stringify(result.outputs),result.nodes.find((node)=>node.error)?.error??null,now(),Date.now()-started,executionId).run();
+  const executionId=message.executionId??uuid('exec'); const started=Date.now();
+  try {
+    const row=await ownedWorkflow(env,message.userId,message.workflowId); if(!row)throw new Error('Workflow not found');
+    const workflow=parseJson<WorkflowDefinition>(String(row.definition_json),{} as WorkflowDefinition);
+    const daily=await env.DB.prepare("SELECT COUNT(*) total FROM workflow_executions WHERE user_id=? AND date(started_at)=date('now')").bind(message.userId).first<{total:number}>();
+    if((daily?.total??0)>=Number(env.FREE_DAILY_RUN_LIMIT)&&!message.executionId)throw new Error('Daily workflow run limit reached');
+    if(message.executionId) await env.DB.prepare("UPDATE workflow_executions SET status='running' WHERE id=?").bind(executionId).run();
+    else await env.DB.prepare('INSERT INTO workflow_executions (id,workflow_id,workflow_version,user_id,status,mode,trigger_json,started_at) VALUES (?,?,?,?,?,?,?,?)').bind(executionId,workflow.id,workflow.version,message.userId,'running',message.mode,JSON.stringify(message.input),now()).run();
+    await env.DB.batch([env.DB.prepare('DELETE FROM node_executions WHERE execution_id=?').bind(executionId),env.DB.prepare('DELETE FROM ai_usage WHERE execution_id=?').bind(executionId)]);
+    const installationId=typeof message.input.installationId==='string'?message.input.installationId:undefined;
+    const github=installationId&&env.GITHUB_APP_ID&&env.GITHUB_PRIVATE_KEY?new GitHubAppClient(env.GITHUB_APP_ID,env.GITHUB_PRIVATE_KEY,installationId):null;
+    const pr=pullRequestFromInput(message.input);
+    const check=await startReviewCheck(github,pr);
+    const result=await executeWorkflow(workflow,message.input,executors(env,executionId,installationId));
+    for(const node of result.nodes)await env.DB.prepare('INSERT INTO node_executions (id,execution_id,node_id,status,input_json,output_json,error,duration_ms,started_at) VALUES (?,?,?,?,?,?,?,?,?)').bind(uuid('nexec'),executionId,node.nodeId,node.status,JSON.stringify(node.input),node.output===undefined?null:JSON.stringify(node.output),node.error??null,node.durationMs,new Date(started).toISOString()).run();
+    await completeReviewCheck(github,pr,check,result);
+    await env.DB.prepare('UPDATE workflow_executions SET status=?,outputs_json=?,error=?,completed_at=?,duration_ms=? WHERE id=?').bind(result.status,JSON.stringify(result.outputs),result.nodes.find((node)=>node.error)?.error??null,now(),Date.now()-started,executionId).run();
+  } catch(error) {
+    await failExecution(env,executionId,started,error);
+    throw error;
+  }
 }
 
 async function processGitHubEvent(env:Bindings,eventId:string){

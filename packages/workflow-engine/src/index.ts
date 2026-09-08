@@ -102,7 +102,8 @@ export async function executeWorkflow(workflow: WorkflowDefinition, initial: Exe
         output = await executor({...node,config: input as Record<string, unknown>}, context);
       }
       context[node.id] = output;
-      runs.push({nodeId:id,status:'success',input,output,durationMs:Date.now()-started});
+      const skippedByExecutor=Boolean(output&&typeof output==='object'&&(output as {skipped?:unknown}).skipped===true);
+      runs.push({nodeId:id,status:skippedByExecutor?'skipped':'success',input,output,durationMs:Date.now()-started});
       if (node.type === 'logic.condition') {
         const result = Boolean((output as {result:boolean}).result);
         workflow.edges.filter((edge) => edge.source === id && edge.sourceHandle && edge.sourceHandle !== String(result)).forEach((edge) => skipped.add(edge.target));

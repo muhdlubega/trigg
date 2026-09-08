@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertSafeHttpUrl, normalizePullRequestEvent, verifyGitHubSignature } from '../src';
+import { assertSafeHttpUrl, githubErrorMessage, normalizePullRequestEvent, verifyGitHubSignature } from '../src';
 
 describe('integration security', () => {
   it('accepts a valid GitHub HMAC and rejects tampering', async () => {
@@ -20,6 +20,10 @@ describe('integration security', () => {
   });
 
   it('normalizes a real GitHub pull request webhook shape', () => {
-    expect(normalizePullRequestEvent({action:'opened',repository:{id:42,full_name:'owner/repo'},pull_request:{number:7,title:'Fix',body:null,html_url:'https://github.com/owner/repo/pull/7',user:{login:'octocat'},base:{ref:'main'},head:{ref:'fix'}}})).toEqual({repository:'owner/repo',repositoryId:'42',prNumber:7,title:'Fix',body:'',author:'octocat',action:'opened',baseBranch:'main',headBranch:'fix',url:'https://github.com/owner/repo/pull/7'});
+    expect(normalizePullRequestEvent({action:'opened',repository:{id:42,full_name:'owner/repo'},pull_request:{number:7,title:'Fix',body:null,html_url:'https://github.com/owner/repo/pull/7',user:{login:'octocat'},base:{ref:'main'},head:{ref:'fix',sha:'abc123'}}})).toEqual({repository:'owner/repo',repositoryId:'42',prNumber:7,title:'Fix',body:'',author:'octocat',action:'opened',baseBranch:'main',headBranch:'fix',headSha:'abc123',url:'https://github.com/owner/repo/pull/7'});
+  });
+  it('formats GitHub API error bodies as readable sentences', async () => {
+    const response=new Response(JSON.stringify({message:'Resource not accessible by integration',documentation_url:'https://docs.github.com'}),{status:403});
+    await expect(githubErrorMessage(response)).resolves.toBe('GitHub API failed (403): Resource not accessible by integration');
   });
 });
