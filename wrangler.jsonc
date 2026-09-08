@@ -9,8 +9,8 @@
     "ENVIRONMENT":"production",
     "ALLOWED_ORIGINS":"http://localhost:5173,https://trigg.pages.dev",
     "WEB_URL":"https://trigg.pages.dev",
-    "MISTRAL_MODEL":"mistral-large-latest",
-    "GEMINI_MODEL":"gemini-2.5-flash",
+    "MISTRAL_MODEL":"mistral-small-latest",
+    "GEMINI_MODEL":"gemini-3.5-flash-lite",
     "EMAIL_FROM":"Trigg <automation@example.com>",
     "FREE_DAILY_RUN_LIMIT":"100",
     "FREE_DAILY_AI_LIMIT":"50"
