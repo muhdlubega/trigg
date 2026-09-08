@@ -34,6 +34,34 @@ export async function createGitHubAppJwt(appId:string, privateKeyPem:string):Pro
   return `${header}.${payload}.${base64Url(signature)}`;
 }
 
+export type GitHubInstallationPermissions=Record<string,string>;
+export const REQUIRED_GITHUB_PERMISSIONS=[
+  {key:'metadata',level:'read',label:'Metadata: read'},
+  {key:'contents',level:'read',label:'Contents: read'},
+  {key:'pull_requests',level:'write',label:'Pull requests: write'},
+  {key:'checks',level:'write',label:'Checks: write'},
+] as const;
+const WRITE_LEVELS=['write','admin'];
+
+/** Granted permissions only widen, so a read requirement is met by any level GitHub reports. */
+export function missingGitHubPermissions(granted:GitHubInstallationPermissions):string[] {
+  return REQUIRED_GITHUB_PERMISSIONS.filter(({key,level})=>{
+    const value=granted[key];
+    if(!value) return true;
+    return level==='write'&&!WRITE_LEVELS.includes(value);
+  }).map(({label})=>label);
+}
+
+/** GitHub answers every missing-permission case with the same opaque 403, so name the scope the path needs. */
+function permissionForPath(url:string):string|undefined {
+  let path=url;
+  try { path=new URL(url).pathname; } catch { /* Fall back to the raw value when the URL is unparseable. */ }
+  if(path.includes('/check-runs')) return 'Checks: write';
+  if(/\/pulls\/\d+\/reviews$/.test(path)) return 'Pull requests: write';
+  if(path.includes('/issues')) return 'Issues: write';
+  return undefined;
+}
+
 export async function githubErrorMessage(response:Response,fallback='GitHub API failed'):Promise<string> {
   if(response.status===403&&response.headers.get('x-ratelimit-remaining')==='0') return `GitHub rate limit reached; resets at ${response.headers.get('x-ratelimit-reset')??'unknown'}`;
   const body=await response.text().catch(()=>'');
@@ -42,22 +70,27 @@ export async function githubErrorMessage(response:Response,fallback='GitHub API 
     const parsed=JSON.parse(body) as {message?:unknown};
     if(typeof parsed.message==='string') detail=parsed.message;
   } catch { detail=body.replace(/\s+/g,' ').trim(); }
-  return `${fallback} (${response.status})${detail?`: ${detail.slice(0,200)}`:''}`;
+  const message=`${fallback} (${response.status})${detail?`: ${detail.slice(0,200)}`:''}`;
+  if(response.status!==403||!detail.includes('not accessible by integration')) return message;
+  const permission=permissionForPath(response.url);
+  return `${message}. The installation is missing ${permission?`"${permission}"`:'a required permission'}. Grant it on the GitHub App, then accept the updated permissions on the installation at https://github.com/settings/installations`;
 }
 
 export type GitHubCheckConclusion='success'|'failure'|'neutral'|'cancelled'|'timed_out'|'action_required'|'skipped';
 export type GitHubCheckRun={id:number;html_url?:string;status:string;conclusion?:string|null};
 
 export class GitHubAppClient {
-  private token?:{value:string;expires:number};
+  private token?:{value:string;expires:number;permissions:GitHubInstallationPermissions};
   constructor(private readonly appId:string,private readonly privateKey:string,private readonly installationId:string) {}
   private async installationToken() {
     if(this.token && this.token.expires>Date.now()+60_000) return this.token.value;
     const jwt=await createGitHubAppJwt(this.appId,this.privateKey);
     const response=await fetch(`https://api.github.com/app/installations/${this.installationId}/access_tokens`,{method:'POST',headers:{authorization:`Bearer ${jwt}`,accept:'application/vnd.github+json','user-agent':'trigg/0.1','x-github-api-version':'2022-11-28'}});
     if(!response.ok) throw new Error(await githubErrorMessage(response,'GitHub token request failed'));
-    const json=await response.json() as {token:string;expires_at:string}; this.token={value:json.token,expires:new Date(json.expires_at).getTime()}; return json.token;
+    const json=await response.json() as {token:string;expires_at:string;permissions?:GitHubInstallationPermissions}; this.token={value:json.token,expires:new Date(json.expires_at).getTime(),permissions:json.permissions??{}}; return json.token;
   }
+  /** The token mints with exactly the permissions the installation has accepted, not the ones the app requests. */
+  async installationPermissions():Promise<GitHubInstallationPermissions> { await this.installationToken(); return this.token?.permissions??{}; }
   async request<T>(method:string,path:string,body?:unknown):Promise<T> {
     const token=await this.installationToken(); const response=await fetch(`https://api.github.com${path}`,{method,headers:{authorization:`Bearer ${token}`,accept:'application/vnd.github+json','content-type':'application/json','user-agent':'trigg/0.1','x-github-api-version':'2022-11-28'},...(body===undefined?{}:{body:JSON.stringify(body)})});
     if(!response.ok) throw new Error(await githubErrorMessage(response));

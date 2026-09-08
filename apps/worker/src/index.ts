@@ -3,7 +3,7 @@ import { cors } from 'hono/cors';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { z } from 'zod';
 import { CodeReviewSchema, FallbackAIProvider, GeminiProvider, MistralProvider, type AIProvider, type CodeReview } from '@trigg/ai';
-import { GitHubAppClient, ResendEmailProvider, assertSafeHttpUrl, normalizePullRequestEvent, verifyGitHubSignature, type GitHubCheckConclusion, type GitHubCheckRun, type GitHubPullRequestContext } from '@trigg/integrations';
+import { GitHubAppClient, ResendEmailProvider, assertSafeHttpUrl, missingGitHubPermissions, normalizePullRequestEvent, verifyGitHubSignature, type GitHubCheckConclusion, type GitHubCheckRun, type GitHubPullRequestContext } from '@trigg/integrations';
 import { WORKFLOW_TEMPLATES, workflowDefinitionSchema, type ApiError, type ApiResponse, type WorkflowDefinition, type WorkflowNode } from '@trigg/shared';
 import { executeWorkflow, type ExecutionContext, type NodeExecutor } from '@trigg/workflow-engine';
 
@@ -127,7 +127,17 @@ app.post('/api/workflows/:id/run',async(c)=>{
 app.get('/api/executions',async(c)=>{const result=await c.env.DB.prepare('SELECT e.*,w.name workflow_name FROM workflow_executions e JOIN workflows w ON w.id=e.workflow_id WHERE e.user_id=? ORDER BY e.started_at DESC LIMIT 100').bind(c.get('user').id).all();return c.json(ok(result.results));});
 app.get('/api/executions/:id',async(c)=>{const execution=await c.env.DB.prepare('SELECT e.*,w.name workflow_name,v.definition_json FROM workflow_executions e JOIN workflows w ON w.id=e.workflow_id JOIN workflow_versions v ON v.workflow_id=e.workflow_id AND v.version=e.workflow_version WHERE e.id=? AND e.user_id=?').bind(c.req.param('id'),c.get('user').id).first();if(!execution)return fail('NOT_FOUND','Execution not found',404);const nodes=await c.env.DB.prepare('SELECT * FROM node_executions WHERE execution_id=? ORDER BY started_at').bind(c.req.param('id')).all();const usage=await c.env.DB.prepare('SELECT * FROM ai_usage WHERE execution_id=?').bind(c.req.param('id')).all();return c.json(ok({execution,nodes:nodes.results,aiUsage:usage.results}));});
 
-app.get('/api/integrations/github',async(c)=>{const installs=await c.env.DB.prepare('SELECT g.*,COUNT(r.id) repository_count FROM github_installations g LEFT JOIN repositories r ON r.installation_id=g.id WHERE g.user_id=? GROUP BY g.id').bind(c.get('user').id).all();return c.json(ok({configured:Boolean(c.env.GITHUB_APP_ID),appSlug:c.env.GITHUB_APP_SLUG??null,installations:installs.results}));});
+app.get('/api/integrations/github',async(c)=>{
+  const installs=await c.env.DB.prepare('SELECT g.*,COUNT(r.id) repository_count FROM github_installations g LEFT JOIN repositories r ON r.installation_id=g.id WHERE g.user_id=? GROUP BY g.id').bind(c.get('user').id).all<Record<string,string|number>>();
+  const installations=await Promise.all(installs.results.map(async(installation)=>{
+    if(!c.env.GITHUB_APP_ID||!c.env.GITHUB_PRIVATE_KEY)return {...installation,missingPermissions:[] as string[]};
+    try {
+      const client=new GitHubAppClient(c.env.GITHUB_APP_ID,c.env.GITHUB_PRIVATE_KEY,String(installation.installation_id));
+      return {...installation,missingPermissions:missingGitHubPermissions(await client.installationPermissions())};
+    } catch { return {...installation,missingPermissions:[] as string[]}; }
+  }));
+  return c.json(ok({configured:Boolean(c.env.GITHUB_APP_ID),appSlug:c.env.GITHUB_APP_SLUG??null,installations}));
+});
 app.get('/api/github/repositories',async(c)=>{const user=c.get('user');const installations=await c.env.DB.prepare('SELECT id,installation_id FROM github_installations WHERE user_id=?').bind(user.id).all<{id:string;installation_id:string}>();for(const installation of installations.results){try{await syncGitHubRepositories(c.env,user.id,installation.id,installation.installation_id);}catch{/* Return cached repositories if GitHub is temporarily unavailable. */}}const result=await c.env.DB.prepare('SELECT * FROM repositories WHERE user_id=? ORDER BY updated_at DESC,full_name ASC').bind(user.id).all();return c.json(ok(result.results));});
 app.post('/api/integrations/github/connect',async(c)=>{if(!c.env.GITHUB_APP_SLUG)return fail('NOT_CONFIGURED','GitHub App slug is not configured');const state=crypto.randomUUID();const timestamp=now();await c.env.DB.prepare("DELETE FROM integration_connections WHERE user_id=? AND provider='github_pending'").bind(c.get('user').id).run();await c.env.DB.prepare('INSERT INTO integration_connections (id,user_id,provider,status,config_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?)').bind(uuid('conn'),c.get('user').id,'github_pending','pending',JSON.stringify({state,expiresAt:Date.now()+15*60*1000}),timestamp,timestamp).run();return c.json(ok({url:`https://github.com/apps/${c.env.GITHUB_APP_SLUG}/installations/new?state=${encodeURIComponent(state)}`}));});
 app.post('/api/integrations/github/callback',async(c)=>{
