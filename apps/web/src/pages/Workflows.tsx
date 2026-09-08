@@ -18,7 +18,7 @@ export function Workflows(){
   const repository=sorted.find((item)=>item.id===selectedRepositoryId)??sorted[0];
   const select=(id:string)=>setParams(id===sorted[0]?.id?{}:{repository:id},{replace:true});
   const {refresh,isManual,isAuto}=useRefresh(repositories.refetch,repositories.isFetching,repositories.isLoading);
-  return <div className="page">
+  return <div className="page workflows-page">
     <PageHeader eyebrow="AI CODE REVIEW" title="Repository reviews" description="Turn on automatic AI reviews for pull requests in your repositories." action={<RefreshButton isRefreshing={isManual} onRefresh={refresh}/>}/>
     <AutoRefreshToast active={isAuto}/>
     <div className="workflows-layout">

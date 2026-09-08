@@ -18,7 +18,7 @@ export function Executions(){
   const query=useQuery({queryKey:['executions'],queryFn:()=>api<Row[]>('/api/executions'),refetchInterval:(result)=>pollIfAnyActive(result.state.data)});
   const rows=(query.data??[]).filter((row)=>filter==='all'||(filter==='test'?row.mode.toLowerCase()==='test':row.status.toLowerCase()===filter));
   const {refresh,isManual,isAuto}=useRefresh(query.refetch,query.isFetching,query.isLoading);
-  return <div className="page">
+  return <div className="page executions-page">
     <PageHeader eyebrow="OBSERVABILITY" title="Executions" description="Inspect every trigger, decision, action, and retry." action={<RefreshButton isRefreshing={isManual} onRefresh={refresh}/>}/>
     <AutoRefreshToast active={isAuto}/>
     <section className="panel executions-panel"><header><h2>All runs</h2><div className="filter-tabs">{(['all','success','failed','test'] as const).map((value)=><button key={value} className={filter===value?'active':''} onClick={()=>setFilter(value)}>{value[0]?.toUpperCase()}{value.slice(1)}</button>)}</div></header>
@@ -40,7 +40,7 @@ export function ExecutionDetail(){
   const review=outputs.review??parseJson<Review|null>(nodes.find((node)=>node.node_id==='review')?.output_json,null)??undefined;
   const comment=nodes.find((node)=>node.node_id==='comment');
   const posted=parseJson<{html_url?:string;skipped?:boolean;reason?:string}>(comment?.output_json,{});
-  return <div className="page">
+  return <div className="page execution-detail">
     <Link className="back" to="/executions"><ArrowLeft size={14}/>Executions</Link>
     <PageHeader eyebrow={`EXECUTION · ${execution.mode}`} title={String(execution.workflow_name)} description={`Started ${new Date(String(execution.started_at)).toLocaleString()}`} action={<><RefreshButton isRefreshing={isManual} onRefresh={refresh}/><Status value={String(execution.status)}/></>}/>
     <AutoRefreshToast active={isAuto}/>
